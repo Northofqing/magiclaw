@@ -1,0 +1,12 @@
+{
+  "db_path": "data/aiclaw.db",
+  "wechat": {
+    "enabled": true,
+    "base_url": "https://ilinkai.weixin.qq.com",
+    "token": "REPLACE_ME",
+    "context_token": "REPLACE_ME",
+    "account_id": "default",
+    "timeout_ms": 15000,
+    "keepalive_timeout_ms": 4000
+  }
+}
