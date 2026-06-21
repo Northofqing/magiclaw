@@ -32,7 +32,7 @@
 
 ### 2.1 本期范围
 
-- 在现有 `data/aiclaw.db` 增加绑定与推送相关表
+- 在现有 `data/magiclaw.db` 增加绑定与推送相关表
 - 新增 CLI 命令：导入绑定、导入推送、执行推送、查看绑定
 - 支持两种绑定入口：
   - 扫码后在微信发送绑定命令
@@ -62,13 +62,13 @@
 
 ### 方案 B：SQLite 绑定中心（选中）
 
-- 做法：扩展现有 `aiclaw.db`，绑定和推送任务入库，发送仍走 outbox
+- 做法：扩展现有 `magiclaw.db`，绑定和推送任务入库，发送仍走 outbox
 - 优点：事务一致性好、与现有恢复/审计模型一致、易扩展到 HTTP/MCP
 - 缺点：需要 schema 扩展与 CLI 子命令
 
 ### 方案 C：外部消息队列
 
-- 做法：导入任务写外部队列，aiclaw 消费
+- 做法：导入任务写外部队列，magiclaw 消费
 - 优点：吞吐更高
 - 缺点：复杂度高，不适合当前阶段
 
@@ -80,8 +80,8 @@
 
 ```mermaid
 flowchart TD
-    A[External System] -->|JSONL/CSV| B[aiclaw CLI import]
-    B --> C[(SQLite data/aiclaw.db)]
+    A[External System] -->|JSONL/CSV| B[magiclaw CLI import]
+    B --> C[(SQLite data/magiclaw.db)]
     C --> D[Push Job Runner]
     D --> E[Outbox.pending]
     E --> F[Outbox Worker]
@@ -236,7 +236,7 @@ flowchart TD
 
 落地入口说明（重要）：
 
-- 第 2 步“用户扫码后命中 aiclaw”需要一个**用户侧入口**：要么 HTTP 落地页消费 token，要么入站消息携带 token（如 `bind-token <token>`）。
+- 第 2 步“用户扫码后命中 magiclaw”需要一个**用户侧入口**：要么 HTTP 落地页消费 token，要么入站消息携带 token（如 `bind-token <token>`）。
 - 本期 Phase A 只有 CLI，**没有该落地入口**，因此“绑定码自动绑定”在 Phase A **不交付**，排到 Phase B 并明确入口形态。
 - Phase A 仅交付：schema、文件导入绑定（§8）、推送导入与 `push run`；命令绑定（§6.1）依赖扫码登录（§6.0），随 Phase B 交付。
 
@@ -279,13 +279,13 @@ WeChat ilink 是**被动信道**：要主动给某个 peer 推送，必须持有
 
 ### 8.1 命令清单（第一阶段）
 
-- `aiclaw bind import --jsonl <path>`
-- `aiclaw bind import --csv <path>`
-- `aiclaw push import --jsonl <path>`
-- `aiclaw push import --csv <path>`
-- `aiclaw push run --job <job_id>`
-- `aiclaw project list`
-- `aiclaw binding list --project <project_key>`
+- `magiclaw bind import --jsonl <path>`
+- `magiclaw bind import --csv <path>`
+- `magiclaw push import --jsonl <path>`
+- `magiclaw push import --csv <path>`
+- `magiclaw push run --job <job_id>`
+- `magiclaw project list`
+- `magiclaw binding list --project <project_key>`
 
 ### 8.2 导入格式
 
@@ -327,7 +327,7 @@ proj_a,wechat,u1,conv_u1,direct,import
 
 ### 9.1 已收拢
 
-- 默认数据库路径：`data/aiclaw.db`
+- 默认数据库路径：`data/magiclaw.db`
 
 ### 9.2 本设计新增
 

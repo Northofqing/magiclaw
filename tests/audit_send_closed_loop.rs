@@ -7,14 +7,14 @@
 
 use async_trait::async_trait;
 
-use aiclaw::adapters::sqlite_audit::SqliteAuditSink;
-use aiclaw::adapters::sqlite_dead_letter::SqliteDeadLetterRepo;
-use aiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
-use aiclaw::application::audit::query_audit_logs;
-use aiclaw::application::outbox_worker::{self, OutboxMessageSender};
-use aiclaw::domain::ports::outbox_repo::OutboxRepo;
-use aiclaw::domain::storage::outbox::{OutboxEntry, RetryConfig};
-use aiclaw::infrastructure::db::{init_db, DbPool};
+use magiclaw::adapters::sqlite_audit::SqliteAuditSink;
+use magiclaw::adapters::sqlite_dead_letter::SqliteDeadLetterRepo;
+use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
+use magiclaw::application::audit::query_audit_logs;
+use magiclaw::application::outbox_worker::{self, OutboxMessageSender};
+use magiclaw::domain::ports::outbox_repo::OutboxRepo;
+use magiclaw::domain::storage::outbox::{OutboxEntry, RetryConfig};
+use magiclaw::infrastructure::db::{init_db, DbPool};
 
 struct AlwaysOk;
 

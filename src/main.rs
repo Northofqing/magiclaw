@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
-use aiclaw::adapters::mcp::server::McpServer;
-use aiclaw::channels::wechat::ilink::{send_text_via_ilink, ILinkSendConfig};
-use aiclaw::infrastructure::config::AppConfig;
-use aiclaw::infrastructure::runtime::AppRuntime;
-use aiclaw::infrastructure::tracing_init;
+use magiclaw::adapters::api_client_registry::ApiClientRegistry;
+use magiclaw::adapters::mcp::server::McpServer;
+use magiclaw::channels::wechat::ilink::{send_text_via_ilink, ILinkSendConfig};
+use magiclaw::infrastructure::config::AppConfig;
+use magiclaw::infrastructure::runtime::AppRuntime;
+use magiclaw::infrastructure::tracing_init;
 use serde::{Deserialize, Serialize};
 
-/// Default HTTP API address for the aiclaw daemon (matches weclaw convention).
+/// Default HTTP API address for the magiclaw daemon (matches weclaw convention).
 const DEFAULT_API_ADDR: &str = "127.0.0.1:18011";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,11 +22,37 @@ enum CliCommand {
     Daemon,
     Mcp,
     Send(SendCommand),
+    Auth(AuthCommand),
     BindImport(ImportCommand),
     PushImport(ImportCommand),
     PushRun(String),
     ProjectList,
     BindingList(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthCommand {
+    Issue(AuthIssueCommand),
+    List(AuthListCommand),
+    Revoke(AuthRevokeCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthIssueCommand {
+    project_id: String,
+    client_name: String,
+    scopes: Vec<String>,
+    ttl_secs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthListCommand {
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthRevokeCommand {
+    token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +87,7 @@ struct ProjectWechatAccount {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  aiclaw                Start daemon mode\n  aiclaw --mcp          Start MCP server mode\n  aiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  aiclaw bind import (--jsonl <path> | --csv <path>)\n  aiclaw push import (--jsonl <path> | --csv <path>)\n  aiclaw push run --job <job_id>\n  aiclaw project list\n  aiclaw binding list --project <project_key>\n\nEnvironment:\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)"
+    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nEnvironment:\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)"
 }
 
 fn default_wechat_data_dir() -> PathBuf {
@@ -127,11 +154,15 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
         return parse_push_args(&args[2..]);
     }
 
+    if args[1] == "auth" {
+        return parse_auth_args(&args[2..]).map(CliCommand::Auth);
+    }
+
     if args[1] == "project" {
         if args.get(2).map(String::as_str) == Some("list") && args.len() == 3 {
             return Ok(CliCommand::ProjectList);
         }
-        return Err(format!("usage: aiclaw project list\n{}", usage()));
+        return Err(format!("usage: magiclaw project list\n{}", usage()));
     }
 
     if args[1] == "binding" {
@@ -222,10 +253,10 @@ fn parse_push_args(args: &[String]) -> Result<CliCommand, String> {
             if rest.len() == 2 && rest[0] == "--job" {
                 Ok(CliCommand::PushRun(rest[1].clone()))
             } else {
-                Err(format!("usage: aiclaw push run --job <job_id>\n{}", usage()))
+                Err(format!("usage: magiclaw push run --job <job_id>\n{}", usage()))
             }
         }
-        _ => Err(format!("usage: aiclaw push (import ... | run --job <id>)\n{}", usage())),
+        _ => Err(format!("usage: magiclaw push (import ... | run --job <id>)\n{}", usage())),
     }
 }
 
@@ -233,11 +264,108 @@ fn parse_binding_args(args: &[String]) -> Result<CliCommand, String> {
     if args.len() == 3 && args[0] == "list" && args[1] == "--project" {
         return Ok(CliCommand::BindingList(args[2].clone()));
     }
-    Err(format!("usage: aiclaw binding list --project <project_key>\n{}", usage()))
+    Err(format!("usage: magiclaw binding list --project <project_key>\n{}", usage()))
+}
+
+fn parse_scopes(value: &str) -> Result<Vec<String>, String> {
+    let scopes: Vec<String> = value
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect();
+    if scopes.is_empty() {
+        return Err("scopes cannot be empty".into());
+    }
+    Ok(scopes)
+}
+
+fn parse_auth_args(args: &[String]) -> Result<AuthCommand, String> {
+    match args.first().map(String::as_str) {
+        Some("issue") => {
+            let mut project_id = None::<String>;
+            let mut client_name = None::<String>;
+            let mut scopes = None::<Vec<String>>;
+            let mut ttl_secs = 86_400_i64;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--project" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --project\n{}", usage()))?;
+                        project_id = Some(value.clone());
+                    }
+                    "--name" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --name\n{}", usage()))?;
+                        client_name = Some(value.clone());
+                    }
+                    "--scopes" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --scopes\n{}", usage()))?;
+                        scopes = Some(parse_scopes(value)?);
+                    }
+                    "--ttl-secs" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --ttl-secs\n{}", usage()))?;
+                        ttl_secs = value
+                            .parse::<i64>()
+                            .map_err(|e| format!("invalid --ttl-secs value: {}", e))?;
+                    }
+                    "--help" | "-h" => return Err(usage().to_string()),
+                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
+                }
+                index += 1;
+            }
+            Ok(AuthCommand::Issue(AuthIssueCommand {
+                project_id: project_id.ok_or_else(|| format!("missing required flag: --project\n{}", usage()))?,
+                client_name: client_name.ok_or_else(|| format!("missing required flag: --name\n{}", usage()))?,
+                scopes: scopes.ok_or_else(|| format!("missing required flag: --scopes\n{}", usage()))?,
+                ttl_secs,
+            }))
+        }
+        Some("list") => {
+            let mut project_id = None::<String>;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--project" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --project\n{}", usage()))?;
+                        project_id = Some(value.clone());
+                    }
+                    "--help" | "-h" => return Err(usage().to_string()),
+                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
+                }
+                index += 1;
+            }
+            Ok(AuthCommand::List(AuthListCommand { project_id }))
+        }
+        Some("revoke") => {
+            let mut token = None::<String>;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--token" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --token\n{}", usage()))?;
+                        token = Some(value.clone());
+                    }
+                    "--help" | "-h" => return Err(usage().to_string()),
+                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
+                }
+                index += 1;
+            }
+            Ok(AuthCommand::Revoke(AuthRevokeCommand {
+                token: token.ok_or_else(|| format!("missing required flag: --token\n{}", usage()))?,
+            }))
+        }
+        _ => Err(format!("usage: magiclaw auth (issue|list|revoke)\n{}", usage())),
+    }
 }
 
 /// Open the SQLite pool used by the binding/push CLI, creating the parent dir.
-fn open_db_pool() -> Result<aiclaw::infrastructure::db::DbPool, Box<dyn std::error::Error>> {
+fn open_db_pool() -> Result<magiclaw::infrastructure::db::DbPool, Box<dyn std::error::Error>> {
     let db_path = AppConfig::default().db_path;
     if db_path != ":memory:" {
         if let Some(parent) = Path::new(&db_path).parent() {
@@ -246,11 +374,15 @@ fn open_db_pool() -> Result<aiclaw::infrastructure::db::DbPool, Box<dyn std::err
             }
         }
     }
-    let conn = aiclaw::infrastructure::db::init_db(&db_path)?;
-    Ok(aiclaw::infrastructure::db::DbPool::new(conn))
+    let conn = magiclaw::infrastructure::db::init_db(&db_path)?;
+    Ok(magiclaw::infrastructure::db::DbPool::new(conn))
 }
 
-fn print_import_summary(label: &str, summary: &aiclaw::application::binding::ImportSummary) {
+fn open_api_client_registry() -> Result<ApiClientRegistry, Box<dyn std::error::Error>> {
+    Ok(ApiClientRegistry::new(open_db_pool()?))
+}
+
+fn print_import_summary(label: &str, summary: &magiclaw::application::binding::ImportSummary) {
     println!("{}: total={} success={} failed={}", label, summary.total, summary.success, summary.failed);
     for err in &summary.errors {
         eprintln!("  - {}", err);
@@ -258,7 +390,7 @@ fn print_import_summary(label: &str, summary: &aiclaw::application::binding::Imp
 }
 
 fn run_bind_import(cmd: &ImportCommand) -> Result<(), Box<dyn std::error::Error>> {
-    use aiclaw::application::binding::{import_bindings_csv, import_bindings_jsonl};
+    use magiclaw::application::binding::{import_bindings_csv, import_bindings_jsonl};
     let db = open_db_pool()?;
     let summary = match cmd.format {
         ImportFormat::Jsonl => import_bindings_jsonl(&db, &cmd.path)?,
@@ -269,7 +401,7 @@ fn run_bind_import(cmd: &ImportCommand) -> Result<(), Box<dyn std::error::Error>
 }
 
 fn run_push_import(cmd: &ImportCommand) -> Result<(), Box<dyn std::error::Error>> {
-    use aiclaw::application::push::{import_pushes, parse_pushes_csv, parse_pushes_jsonl};
+    use magiclaw::application::push::{import_pushes, parse_pushes_csv, parse_pushes_jsonl};
     let db = open_db_pool()?;
     let (records, format_tag) = match cmd.format {
         ImportFormat::Jsonl => (parse_pushes_jsonl(&cmd.path)?, "jsonl"),
@@ -278,12 +410,12 @@ fn run_push_import(cmd: &ImportCommand) -> Result<(), Box<dyn std::error::Error>
     let (job_id, summary) = import_pushes(&db, format_tag, &cmd.path, &records)?;
     print_import_summary("push import", &summary);
     println!("job_id={}", job_id);
-    println!("run it with: aiclaw push run --job {}", job_id);
+    println!("run it with: magiclaw push run --job {}", job_id);
     Ok(())
 }
 
 fn run_push_run(job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use aiclaw::application::push::run_push_job;
+    use magiclaw::application::push::run_push_job;
     let db = open_db_pool()?;
     let summary = run_push_job(&db, job_id)?;
     println!(
@@ -294,7 +426,7 @@ fn run_push_run(job_id: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_project_list() -> Result<(), Box<dyn std::error::Error>> {
-    use aiclaw::application::binding::list_projects;
+    use magiclaw::application::binding::list_projects;
     let db = open_db_pool()?;
     let projects = list_projects(&db)?;
     if projects.is_empty() {
@@ -308,7 +440,7 @@ fn run_project_list() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_binding_list(project_key: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use aiclaw::application::binding::list_bindings;
+    use magiclaw::application::binding::list_bindings;
     let db = open_db_pool()?;
     let bindings = list_bindings(&db, project_key)?;
     if bindings.is_empty() {
@@ -321,6 +453,54 @@ fn run_binding_list(project_key: &str) -> Result<(), Box<dyn std::error::Error>>
             b.channel, b.peer_id, b.conversation_id, b.conversation_type, b.bind_source
         );
     }
+    Ok(())
+}
+
+fn run_auth_issue(cmd: &AuthIssueCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = open_api_client_registry()?;
+    let issued = registry.issue_token(
+        &cmd.project_id,
+        &cmd.client_name,
+        &cmd.scopes,
+        cmd.ttl_secs,
+        None,
+    )?;
+    println!(
+        "project_id={} client_name={} expires_at={} scopes={}",
+        issued.record.project_id,
+        issued.record.client_name,
+        issued.record.expires_at,
+        issued.record.scopes.join(",")
+    );
+    println!("token={}", issued.raw_token);
+    Ok(())
+}
+
+fn run_auth_list(cmd: &AuthListCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = open_api_client_registry()?;
+    let rows = registry.list_tokens(cmd.project_id.as_deref())?;
+    if rows.is_empty() {
+        println!("(no api clients)");
+        return Ok(());
+    }
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\texpires_at={}\trevoked_at={:?}\tscopes={}",
+            row.project_id,
+            row.client_name,
+            row.id,
+            row.expires_at,
+            row.revoked_at,
+            row.scopes.join(",")
+        );
+    }
+    Ok(())
+}
+
+fn run_auth_revoke(cmd: &AuthRevokeCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = open_api_client_registry()?;
+    let revoked = registry.revoke_token(&cmd.token)?;
+    println!("revoked={}", revoked);
     Ok(())
 }
 
@@ -360,9 +540,68 @@ fn load_runtime_config() -> AppConfig {
         }
     }
 
-    // AI backend selection (Phase 4): AICLAW_AI_BACKEND overrides the config.
+    // Feishu runtime config from env (optional).
+    if let Ok(enabled) = env::var("MAGICLAW_FEISHU_ENABLED") {
+        let v = enabled.trim().to_ascii_lowercase();
+        config.feishu.enabled = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_ACCOUNT_ID") {
+        if !v.trim().is_empty() {
+            config.feishu.account_id = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_BASE_URL") {
+        if !v.trim().is_empty() {
+            config.feishu.base_url = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_APP_ID") {
+        if !v.trim().is_empty() {
+            config.feishu.app_id = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_APP_SECRET") {
+        if !v.trim().is_empty() {
+            config.feishu.app_secret = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_TENANT_ACCESS_TOKEN") {
+        if !v.trim().is_empty() {
+            config.feishu.tenant_access_token = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_RECEIVE_ID_TYPE") {
+        if !v.trim().is_empty() {
+            config.feishu.receive_id_type = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_VERIFICATION_TOKEN") {
+        if !v.trim().is_empty() {
+            config.feishu.verification_token = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_SIGNING_SECRET") {
+        if !v.trim().is_empty() {
+            config.feishu.signing_secret = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("MAGICLAW_FEISHU_ACCOUNTS_JSON") {
+        if !v.trim().is_empty() {
+            match serde_json::from_str::<Vec<magiclaw::infrastructure::config::FeishuConfig>>(v.trim()) {
+                Ok(accounts) => {
+                    config.feishu_accounts = accounts;
+                    tracing::info!(count = config.feishu_accounts.len(), "loaded feishu multi-account config from env");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "invalid MAGICLAW_FEISHU_ACCOUNTS_JSON; ignored");
+                }
+            }
+        }
+    }
+
+    // AI backend selection (Phase 4): MAGICLAW_AI_BACKEND overrides the config.
     // Defaults to "echo"; set to "claude_code" to invoke the local claude CLI.
-    if let Ok(backend) = env::var("AICLAW_AI_BACKEND") {
+    if let Ok(backend) = env::var("MAGICLAW_AI_BACKEND") {
         if !backend.trim().is_empty() {
             config.ai.backend = backend.trim().to_string();
         }
@@ -388,7 +627,7 @@ fn acquire_singleton(mode: &str, config: &AppConfig) -> Result<SingletonGuard, B
         .unwrap_or_else(|| PathBuf::from("."));
 
     fs::create_dir_all(&lock_dir)?;
-    let lock_path = lock_dir.join("aiclaw.instance.lock");
+    let lock_path = lock_dir.join("magiclaw.instance.lock");
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -397,7 +636,7 @@ fn acquire_singleton(mode: &str, config: &AppConfig) -> Result<SingletonGuard, B
 
     if let Err(e) = file.try_lock_exclusive() {
         return Err(format!(
-            "{} mode refused: another aiclaw instance is already running (lock: {}) ({})",
+            "{} mode refused: another magiclaw instance is already running (lock: {}) ({})",
             mode,
             lock_path.display(),
             e
@@ -415,7 +654,7 @@ fn acquire_singleton(mode: &str, config: &AppConfig) -> Result<SingletonGuard, B
     Ok(SingletonGuard { _lock_file: file })
 }
 
-/// Attempt to deliver a message through the locally-running aiclaw daemon's HTTP API.
+/// Attempt to deliver a message through the locally-running magiclaw daemon's HTTP API.
 /// Returns Ok(message) on success, with distinct error kinds for routing decisions.
 enum DaemonSendError {
     Unreachable(String),
@@ -427,6 +666,7 @@ async fn try_daemon_api_send(
     to: &str,
     text: &str,
     context_token: Option<&str>,
+    api_token: Option<&str>,
 ) -> Result<String, DaemonSendError> {
     #[derive(Serialize)]
     struct ApiSendRequest<'a> {
@@ -457,13 +697,16 @@ async fn try_daemon_api_send(
     let mut last_err = String::new();
     let mut resp_opt = None;
     for _ in 0..3 {
-        let builder = {
-            client.post(&url).json(&ApiSendRequest {
+        let mut builder = client.post(&url).json(&ApiSendRequest {
                 to,
                 text,
                 context_token,
-            })
-        };
+            });
+        if let Some(token) = api_token {
+            if !token.trim().is_empty() {
+                builder = builder.bearer_auth(token.trim());
+            }
+        }
         match builder.send().await {
             Ok(resp) => {
                 resp_opt = Some(resp);
@@ -540,12 +783,13 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
     //   1. Try daemon HTTP API (127.0.0.1:18011) — daemon owns the live session
     //      and refreshes peer tokens itself.
     //   2. Fall back to direct ilink call using the stored context_token.
-    let api_addr = env::var("AICLAW_API_ADDR").unwrap_or_else(|_| DEFAULT_API_ADDR.to_string());
+    let api_addr = env::var("MAGICLAW_API_ADDR").unwrap_or_else(|_| DEFAULT_API_ADDR.to_string());
     match try_daemon_api_send(
         &api_addr,
         &recipient,
         &cmd.message,
         (!context_token.is_empty()).then_some(context_token.as_str()),
+        None,
     )
     .await
     {
@@ -584,7 +828,7 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
         .await
         .map_err(|e| format!("wechat send failed: {}", e))?;
 
-    let receipt = aiclaw::channels::channel_trait::SendReceipt {
+    let receipt = magiclaw::channels::channel_trait::SendReceipt {
         message_id: uuid::Uuid::new_v4().to_string(),
         platform_msg_id: send_result
             .get("msg")
@@ -605,6 +849,8 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Auto-load .env if present; real environment variables still take precedence.
+    let _ = dotenvy::dotenv();
     tracing_init::init_tracing("info");
 
     let args: Vec<String> = env::args().collect();
@@ -615,7 +861,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let runtime = AppRuntime::new(config.clone())?;
             runtime.start_background().await?;
 
-            let api_addr = env::var("AICLAW_API_ADDR").unwrap_or_else(|_| DEFAULT_API_ADDR.to_string());
+            let api_addr = env::var("MAGICLAW_API_ADDR").unwrap_or_else(|_| DEFAULT_API_ADDR.to_string());
             if let Err(e) = runtime.start_http_api(&api_addr) {
                 tracing::warn!(error = %e, "HTTP API disabled");
             }
@@ -623,7 +869,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(
                 active_conversations = runtime.active_conversations(),
                 api_addr = %api_addr,
-                "aiclaw started"
+                "magiclaw started"
             );
 
             tokio::signal::ctrl_c().await?;
@@ -635,12 +881,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             runtime.start_background().await?;
 
             tracing::info!("starting MCP server on stdio");
-            let server = McpServer::new("aiclaw", "0.1.0", runtime.outbox_repo.clone());
+            let server = McpServer::new("magiclaw", "0.1.0", runtime.outbox_repo.clone());
             server.run().await;
         }
         Ok(CliCommand::Send(cmd)) => {
             run_send_command(&cmd).await?;
         }
+        Ok(CliCommand::Auth(cmd)) => match cmd {
+            AuthCommand::Issue(cmd) => run_auth_issue(&cmd)?,
+            AuthCommand::List(cmd) => run_auth_list(&cmd)?,
+            AuthCommand::Revoke(cmd) => run_auth_revoke(&cmd)?,
+        },
         Ok(CliCommand::BindImport(cmd)) => {
             run_bind_import(&cmd)?;
         }
@@ -662,7 +913,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    tracing::info!("aiclaw shutting down");
+    tracing::info!("magiclaw shutting down");
     Ok(())
 }
 
@@ -673,7 +924,7 @@ mod tests {
     #[test]
     fn parse_send_command_with_all_flags() {
         let args = vec![
-            "aiclaw".into(),
+            "magiclaw".into(),
             "send".into(),
             "--data-dir".into(),
             "/tmp/wechat".into(),
@@ -694,9 +945,35 @@ mod tests {
 
     #[test]
     fn parse_mcp_flag_mode() {
-        let args = vec!["aiclaw".into(), "--mcp".into()];
+        let args = vec!["magiclaw".into(), "--mcp".into()];
         let parsed = parse_cli_args(&args).unwrap();
         assert_eq!(parsed, CliCommand::Mcp);
+    }
+
+    #[test]
+    fn parse_auth_issue_command() {
+        let args = vec![
+            "magiclaw".into(),
+            "auth".into(),
+            "issue".into(),
+            "--project".into(),
+            "proj-a".into(),
+            "--name".into(),
+            "worker-a".into(),
+            "--scopes".into(),
+            "send,window_status".into(),
+            "--ttl-secs".into(),
+            "3600".into(),
+        ];
+        match parse_cli_args(&args).unwrap() {
+            CliCommand::Auth(AuthCommand::Issue(cmd)) => {
+                assert_eq!(cmd.project_id, "proj-a");
+                assert_eq!(cmd.client_name, "worker-a");
+                assert_eq!(cmd.scopes, vec!["send".to_string(), "window_status".to_string()]);
+                assert_eq!(cmd.ttl_secs, 3600);
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
     }
 
     #[test]

@@ -84,7 +84,7 @@ AgentCommandParser::parse()
    ├─ 有偏好 → 记下用户的 agent 选择，继续流程
    └─ 无偏好 → 生成"请先选择 agent"提示，返回，不进 AI
         ↓
-   入站消息进 Pipeline（此时 backend 用用户选择而非全局 AICLAW_AI_BACKEND）
+   入站消息进 Pipeline（此时 backend 用用户选择而非全局 MAGICLAW_AI_BACKEND）
 ```
 
 ### 3.2 命令识别与执行
@@ -136,7 +136,7 @@ openclaw 怎么部署
 
 #### 3.2.4 配置覆盖
 
-用户可在 `aiclaw.config.json` 中改别名：
+用户可在 `magiclaw.config.json` 中改别名：
 
 ```json
 {
@@ -215,7 +215,7 @@ impl AgentCommandParser {
 如果需要运行时控制，补充：
 
 ```bash
-AICLAW_USER_AGENT_PREFS_ENABLED=true  # 启用用户偏好（默认 true）
+MAGICLAW_USER_AGENT_PREFS_ENABLED=true  # 启用用户偏好（默认 true）
 ```
 
 ### 5.2 配置文件示例
@@ -240,7 +240,7 @@ AICLAW_USER_AGENT_PREFS_ENABLED=true  # 启用用户偏好（默认 true）
 
 | 组件 | 变更 |
 |------|------|
-| `AICLAW_AI_BACKEND` | 退化成系统保底后端；优先级变成：用户选择 > 全局默认 > echo |
+| `MAGICLAW_AI_BACKEND` | 退化成系统保底后端；优先级变成：用户选择 > 全局默认 > echo |
 | `AiMiddleware` | 不变；从 Pipeline 上下文读取"当前用户的 agent 选择" |
 | `Permission` | 保持占位实现；后续可在这层加"某 agent 只特定人用"的规则 |
 | `RateLimit` | 不变 |
@@ -262,7 +262,7 @@ AICLAW_USER_AGENT_PREFS_ENABLED=true  # 启用用户偏好（默认 true）
 
 ### 7.2 配置覆盖验收
 
-- [ ] 修改 `aiclaw.config.json` 中的别名后，新别名立即生效
+- [ ] 修改 `magiclaw.config.json` 中的别名后，新别名立即生效
 - [ ] 不在 aliases 里的 agent 无法被切换
 
 ### 7.3 集成验收

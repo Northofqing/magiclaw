@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# install-mcp.sh — Install the aiclaw MCP server into another project.
+# install-mcp.sh — Install the magiclaw MCP server into another project.
 #
-# It builds the release binary (if needed) and registers an "aiclaw" stdio
+# It builds the release binary (if needed) and registers an "magiclaw" stdio
 # MCP server entry into a target MCP client config. Existing entries are merged,
 # not overwritten (requires jq or python3).
 #
@@ -13,7 +13,7 @@
 #   TARGET_PROJECT_DIR   Project to install into. Default: current directory.
 #
 # Options:
-#   --name <name>        MCP server key. Default: aiclaw
+#   --name <name>        MCP server key. Default: magiclaw
 #   --target <kind>      Where to register: project | claude-desktop | print
 #                        - project        -> <TARGET_PROJECT_DIR>/.mcp.json   (default)
 #                        - claude-desktop -> Claude Desktop global config
@@ -36,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Defaults ──
-SERVER_NAME="aiclaw"
+SERVER_NAME="magiclaw"
 TARGET_KIND="project"
 TARGET_DIR="$(pwd)"
 WECHAT_DIR=""

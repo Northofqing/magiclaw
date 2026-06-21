@@ -1,7 +1,7 @@
 # MCP 部署与联调文档
 
-> 适用版本:aiclaw(信道中心架构系统)阶段 1.5 MCP Adapter
-> 目标:在本机把 aiclaw 作为 MCP Server 跑起来,供 MCP Client(Claude Desktop / 自研宿主 / 手工 JSON-RPC)联调,先验证 `initialize → tools/list → tools/call` 闭环。
+> 适用版本:magiclaw(信道中心架构系统)阶段 1.5 MCP Adapter
+> 目标:在本机把 magiclaw 作为 MCP Server 跑起来,供 MCP Client(Claude Desktop / 自研宿主 / 手工 JSON-RPC)联调,先验证 `initialize → tools/list → tools/call` 闭环。
 
 ---
 
@@ -34,9 +34,9 @@
 ## 3. 构建
 
 ```bash
-cd /path/to/aiclaw
+cd /path/to/magiclaw
 cargo build --release
-# 产物:target/release/aiclaw
+# 产物:target/release/magiclaw
 ```
 
 冒烟测试(可选):
@@ -49,7 +49,7 @@ cargo test
 
 ## 4. 配置
 
-aiclaw 启动时从 **WeChat 通道数据目录**加载账号配置(不是必须;缺失时以 skeleton 通道运行,`send` 仍可入 Outbox)。
+magiclaw 启动时从 **WeChat 通道数据目录**加载账号配置(不是必须;缺失时以 skeleton 通道运行,`send` 仍可入 Outbox)。
 
 数据目录解析顺序:
 
@@ -82,9 +82,9 @@ aiclaw 启动时从 **WeChat 通道数据目录**加载账号配置(不是必须
 |------|------|------|
 | `WECHAT_CHANNEL_DIR` | `~/.claude/channels/wechat` | WeChat 数据目录 |
 | `RUST_LOG` | `info` | 日志级别(走 stderr)。联调建议 `info` 或 `debug` |
-| `AICLAW_API_ADDR` | `127.0.0.1:18011` | 仅 daemon 模式的 HTTP API;MCP 模式不使用 |
+| `MAGICLAW_API_ADDR` | `127.0.0.1:18011` | 仅 daemon 模式的 HTTP API;MCP 模式不使用 |
 
-> SQLite 落盘默认 `data/aiclaw.db`。程序会在启动时自动创建 `data/` 目录；在固定工作目录启动以保证 Outbox / 崩溃恢复状态连续。
+> SQLite 落盘默认 `data/magiclaw.db`。程序会在启动时自动创建 `data/` 目录；在固定工作目录启动以保证 Outbox / 崩溃恢复状态连续。
 
 ---
 
@@ -92,17 +92,17 @@ aiclaw 启动时从 **WeChat 通道数据目录**加载账号配置(不是必须
 
 ```bash
 # 方式 A:flag
-./target/release/aiclaw --mcp
+./target/release/magiclaw --mcp
 
 # 方式 B:子命令
-./target/release/aiclaw mcp
+./target/release/magiclaw mcp
 ```
 
 注意:
 
 - `--mcp` **不接受额外参数**,否则报错退出。
 - 进程占用 **stdin/stdout** 作为协议通道。**不要**往 stdout 打印任何非协议内容。
-- 日志全部走 **stderr**;联调时可 `2>aiclaw.log` 重定向以免干扰观察。
+- 日志全部走 **stderr**;联调时可 `2>magiclaw.log` 重定向以免干扰观察。
 - stdin 到 EOF(`Ctrl-D` / 客户端关闭)时 Server 优雅退出。
 
 ---
@@ -117,7 +117,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send","arguments":{"channel":"wechat","conversation_id":"conv_001","peer_id":"user_a","conversation_type":"direct","content":"hello from mcp"}}}' \
-  | ./target/release/aiclaw --mcp 2>aiclaw.log
+  | ./target/release/magiclaw --mcp 2>magiclaw.log
 ```
 
 预期 stdout(每条均为 `Content-Length` 帧 + JSON body):
@@ -130,7 +130,7 @@ printf '%s\n' \
 
 ```bash
 # 只应看到 Content-Length 帧与 JSON,绝不应出现日志行
-./target/release/aiclaw --mcp 2>/dev/null <<< '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+./target/release/magiclaw --mcp 2>/dev/null <<< '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 ```
 
 ---
@@ -142,8 +142,8 @@ printf '%s\n' \
 ```json
 {
   "mcpServers": {
-    "aiclaw": {
-      "command": "/path/to/aiclaw/target/release/aiclaw",
+    "magiclaw": {
+      "command": "/path/to/magiclaw/target/release/magiclaw",
       "args": ["--mcp"],
       "env": {
         "WECHAT_CHANNEL_DIR": "/Users/you/.claude/channels/wechat",
@@ -214,7 +214,7 @@ printf '%s\n' \
 
 ```bash
 # 默认 echo;设为 claude_code 即启用本机 claude(只读 plan 模式)
-AICLAW_AI_BACKEND=claude_code ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=claude_code ./target/release/magiclaw
 ```
 
 也可写入配置文件:
@@ -252,10 +252,10 @@ AICLAW_AI_BACKEND=claude_code ./target/release/aiclaw
 
 ```bash
 # 内置 preset:codex(只读沙箱)、copilot(需公版 copilot CLI)
-AICLAW_AI_BACKEND=codex ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=codex ./target/release/magiclaw
 ```
 
-`AICLAW_AI_BACKEND` / 配置 `ai.backend` 的取值与解析顺序:
+`MAGICLAW_AI_BACKEND` / 配置 `ai.backend` 的取值与解析顺序:
 1. `echo`(默认) / `claude_code` —— 专用后端;
 2. 命中 `ai.agents` 中的同名键 —— 使用该自定义 agent(**优先级最高**,可覆盖内置 preset);
 3. 命中内置 preset(`codex` / `copilot`);

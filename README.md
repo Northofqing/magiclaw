@@ -1,4 +1,4 @@
-# aiclaw
+# magiclaw
 
 信道中心架构系统。基于 Rust 的多平台消息中枢，优先保证信道稳定性、顺序正确性和可恢复投递；AI 只是可插拔能力，不是核心依赖。
 
@@ -97,7 +97,7 @@ src/
 
 默认持久化数据放在仓库下的 `data/` 目录：
 
-- `data/aiclaw.db`：SQLite 主库，包含 `inbox`、`outbox`、`dead_letter`、`conversation_state`、`audit_log`、`sync_buf`
+- `data/magiclaw.db`：SQLite 主库，包含 `inbox`、`outbox`、`dead_letter`、`conversation_state`、`audit_log`、`sync_buf`
 
 这一路径默认由程序自动创建；仓库里的 [.gitignore](.gitignore) 已忽略 `data/`。
 
@@ -119,7 +119,7 @@ cargo build --release
 cargo test
 ```
 
-默认 SQLite 数据库文件为 `data/aiclaw.db`。如果希望 Outbox、DLQ、会话状态持续可恢复，应在固定工作目录启动。
+默认 SQLite 数据库文件为 `data/magiclaw.db`。如果希望 Outbox、DLQ、会话状态持续可恢复，应在固定工作目录启动。
 
 ## 6. 部署方式
 
@@ -137,15 +137,14 @@ cargo test
 启动：
 
 ```bash
-./target/release/aiclaw
+./target/release/magiclaw
 ```
 
 相关环境变量：
 
 - `WECHAT_CHANNEL_DIR`：WeChat 数据目录
-- `AICLAW_API_ADDR`：HTTP API 地址，默认 `127.0.0.1:18011`
-- `AICLAW_API_TOKEN`：daemon HTTP API bearer token；`/api/send` 与 `/api/window_status` 需要携带
-- `AICLAW_AI_BACKEND`：AI 后端选择，默认 `echo`
+- `MAGICLAW_API_ADDR`：HTTP API 地址，默认 `127.0.0.1:18011`
+- `MAGICLAW_AI_BACKEND`：AI 后端选择，默认 `echo`
 - `RUST_LOG`：日志级别，日志只走 stderr
 
 HTTP API 当前端点：
@@ -154,7 +153,24 @@ HTTP API 当前端点：
 - `GET /api/health`
 - `GET /api/window_status`
 
-注意：当前 HTTP API 设计为本地 loopback 通信，但 `POST /api/send` 与 `GET /api/window_status` 仍要求 bearer auth；只有 `GET /api/health` 放开。部署时应同时满足“只绑定本机地址 + 配置 `AICLAW_API_TOKEN`”，不要直接暴露公网。
+注意：当前 HTTP API 设计为本地 loopback 通信，但 `POST /api/send` 与 `GET /api/window_status` 仍要求 bearer auth；只有 `GET /api/health` 放开。部署时应同时满足“只绑定本机地址 + 使用 `magiclaw auth issue` 发放项目级 token”，不要直接暴露公网。
+
+项目级 token 管理（动态鉴权）：
+
+```bash
+# 发行一个仅允许发送与窗口状态查询的 token（30 天）
+./target/release/magiclaw auth issue \
+  --project my-project \
+  --name cicd \
+  --scopes send,window_status \
+  --ttl-secs 2592000
+
+# 查看某个项目下已发放 token（仅返回元数据，不返回明文 token）
+./target/release/magiclaw auth list --project my-project
+
+# 撤销 token（使用 issue 命令返回的明文 token）
+./target/release/magiclaw auth revoke --token <raw_token>
+```
 
 ### 6.2 MCP Server 模式
 
@@ -163,13 +179,13 @@ HTTP API 当前端点：
 启动：
 
 ```bash
-./target/release/aiclaw --mcp
+./target/release/magiclaw --mcp
 ```
 
 或：
 
 ```bash
-./target/release/aiclaw mcp
+./target/release/magiclaw mcp
 ```
 
 特点：
@@ -184,8 +200,8 @@ Claude Desktop 配置示例：
 ```json
 {
   "mcpServers": {
-    "aiclaw": {
-      "command": "/path/to/aiclaw/target/release/aiclaw",
+    "magiclaw": {
+      "command": "/path/to/magiclaw/target/release/magiclaw",
       "args": ["--mcp"],
       "env": {
         "WECHAT_CHANNEL_DIR": "/Users/you/.claude/channels/wechat",
@@ -205,7 +221,7 @@ Claude Desktop 配置示例：
 启动：
 
 ```bash
-./target/release/aiclaw send --message "hello"
+./target/release/magiclaw send --message "hello"
 ```
 
 可选参数：
@@ -226,17 +242,17 @@ Claude Desktop 配置示例：
 最短可跑通路径：
 
 1. 准备 WeChat 目录：`~/.claude/channels/wechat/account.json` 和 `context_tokens.json`
-2. 启动 daemon：`./target/release/aiclaw`
-3. 命令行直发验证：`./target/release/aiclaw send --message "hello" --to "<peer_id>"`
-4. 要启用本地 AI 自动回复，先由你选择后端：`AICLAW_AI_BACKEND=claude_code` 或 `AICLAW_AI_BACKEND=codex`
+2. 启动 daemon：`./target/release/magiclaw`
+3. 命令行直发验证：`./target/release/magiclaw send --message "hello" --to "<peer_id>"`
+4. 要启用本地 AI 自动回复，先由你选择后端：`MAGICLAW_AI_BACKEND=claude_code` 或 `MAGICLAW_AI_BACKEND=codex`
 
 ### 7.1 作为本地消息中台使用
 
 1. 准备好 WeChat 账号目录和 `context_tokens.json`
-2. 启动 daemon：`./target/release/aiclaw`
+2. 启动 daemon：`./target/release/magiclaw`
 3. 通过以下任一方式发送消息：
    - HTTP `POST /api/send`
-   - `aiclaw send --message ...`
+   - `magiclaw send --message ...`
    - MCP `tools/call send`
 
 ### 7.2 作为 MCP 工具使用
@@ -246,13 +262,13 @@ Claude Desktop 配置示例：
 1. MCP Host 调 `initialize`
 2. 调 `tools/list`
 3. 调 `tools/call send`
-4. aiclaw 将消息写入 Outbox 并由后台 worker 投递
+4. magiclaw 将消息写入 Outbox 并由后台 worker 投递
 
 ### 7.3 作为 WeChat 自动回复 Agent 使用
 
 只要满足以下条件，入站文本消息就会触发 AI 后端：
 
-1. `AICLAW_AI_BACKEND` 或配置中的 `ai.backend` 不是 `echo`
+1. `MAGICLAW_AI_BACKEND` 或配置中的 `ai.backend` 不是 `echo`
 2. 消息是文本
 3. 没有被 `RateLimit` 限流
 
@@ -261,25 +277,24 @@ Claude Desktop 配置示例：
 如果你想看“微信怎么用电脑上的本地 AI CLI”，可以把它理解成这条链路：Claude Code 和 Codex 都一样，区别只在于你启动时选哪个后端。
 
 1. 微信里有人给机器人发一条文本消息
-2. aiclaw daemon 收到入站消息，进入 `AiMiddleware`
-3. 由于你把 `AICLAW_AI_BACKEND` 选成了 `claude_code` 或 `codex`，daemon 在本机执行对应 CLI
+2. magiclaw daemon 收到入站消息，进入 `AiMiddleware`
+3. 由于你把 `MAGICLAW_AI_BACKEND` 选成了 `claude_code` 或 `codex`，daemon 在本机执行对应 CLI
 4. 本机 CLI 的输出被写回 Outbox
 5. 后台 worker 再把结果发回微信
 
-所以这里不是“微信直接打开某个 AI CLI”，而是“微信消息触发 aiclaw，aiclaw 在电脑本机调用你选定的 CLI，再把结果回发微信”。
+所以这里不是“微信直接打开某个 AI CLI”，而是“微信消息触发 magiclaw，magiclaw 在电脑本机调用你选定的 CLI，再把结果回发微信”。
 
 最小可用配置：
 
 ```bash
-export AICLAW_AI_BACKEND=claude_code
-export AICLAW_API_TOKEN='your-token'
-./target/release/aiclaw
+export MAGICLAW_AI_BACKEND=claude_code
+./target/release/magiclaw
 ```
 
 如果你想用 Codex，把上一行改成：
 
 ```bash
-export AICLAW_AI_BACKEND=codex
+export MAGICLAW_AI_BACKEND=codex
 ```
 
 微信里直接发一句文本，例如：
@@ -302,16 +317,16 @@ export AICLAW_AI_BACKEND=codex
 示例：
 
 ```bash
-AICLAW_AI_BACKEND=claude_code ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=claude_code ./target/release/magiclaw
 ```
 
 ```bash
-AICLAW_AI_BACKEND=codex ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=codex ./target/release/magiclaw
 ```
 
 ### 8.1.1 微信接本地 Claude Code 实际案例（用户选 Claude Code 时）
 
-场景：微信用户给机器人发来一条文本，aiclaw 调本机 `claude` CLI 生成回复，再写入 Outbox 发送回微信。
+场景：微信用户给机器人发来一条文本，magiclaw 调本机 `claude` CLI 生成回复，再写入 Outbox 发送回微信。
 
 前提：
 
@@ -322,7 +337,7 @@ AICLAW_AI_BACKEND=codex ./target/release/aiclaw
 启动：
 
 ```bash
-AICLAW_AI_BACKEND=claude_code ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=claude_code ./target/release/magiclaw
 ```
 
 当前内置调用形态：
@@ -334,7 +349,7 @@ claude -p "<微信文本消息>" --output-format json --permission-mode plan
 典型使用过程：
 
 1. 微信里给机器人发送：`帮我总结一下今天的待办`
-2. aiclaw 读取入站文本，进入 `AiMiddleware`
+2. magiclaw 读取入站文本，进入 `AiMiddleware`
 3. 本机执行 `claude` CLI
 4. 生成结果写入 Outbox，再由后台 worker 发回微信
 
@@ -362,7 +377,7 @@ claude -p "<微信文本消息>" --output-format json --permission-mode plan
 
 ### 8.1.2 微信接本地 Codex 实际案例（用户选 Codex 时）
 
-场景：微信文本消息触发本机 `codex` CLI，由 Codex 生成回复，aiclaw 再回发微信。
+场景：微信文本消息触发本机 `codex` CLI，由 Codex 生成回复，magiclaw 再回发微信。
 
 前提：
 
@@ -372,7 +387,7 @@ claude -p "<微信文本消息>" --output-format json --permission-mode plan
 启动：
 
 ```bash
-AICLAW_AI_BACKEND=codex ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=codex ./target/release/magiclaw
 ```
 
 当前内置调用形态：
@@ -384,9 +399,9 @@ codex exec --skip-git-repo-check --sandbox read-only --color never -o <临时文
 典型使用过程：
 
 1. 微信里给机器人发送：`把这段话压缩成 3 个要点`
-2. aiclaw 调起本机 `codex`
+2. magiclaw 调起本机 `codex`
 3. Codex 把最终回复写入临时文件
-4. aiclaw 读取该文件内容，写入 Outbox，再发送回微信
+4. magiclaw 读取该文件内容，写入 Outbox，再发送回微信
 
 Codex preset 无需额外配置；只要二进制名为 `codex` 并在 `PATH` 上即可。若你的安装方式不同，也可通过 `ai.agents.codex` 覆盖：
 
@@ -496,22 +511,22 @@ cargo build --release
 cargo test
 
 # 启动 daemon
-./target/release/aiclaw
+./target/release/magiclaw
 
 # 启动 MCP server
-./target/release/aiclaw --mcp
+./target/release/magiclaw --mcp
 
 # 命令行直发微信消息
-./target/release/aiclaw send --message "hello" --to "user_id"
+./target/release/magiclaw send --message "hello" --to "user_id"
 
 # 启用本机 Claude Code 自动回复
-AICLAW_AI_BACKEND=claude_code ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=claude_code ./target/release/magiclaw
 
 # 启用本机 Codex 自动回复
-AICLAW_AI_BACKEND=codex ./target/release/aiclaw
+MAGICLAW_AI_BACKEND=codex ./target/release/magiclaw
 
 # 查看持久化数据库位置
-ls -lh data/aiclaw.db
+ls -lh data/magiclaw.db
 ```
 
 ## 11. 相关文档

@@ -92,6 +92,18 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, rusqlite::Error> {
              created_at INTEGER NOT NULL DEFAULT (unixepoch())
          );
 
+         CREATE TABLE IF NOT EXISTS api_clients (
+             id TEXT PRIMARY KEY,
+             project_id TEXT NOT NULL,
+             client_name TEXT NOT NULL,
+             token_hash TEXT NOT NULL UNIQUE,
+             scopes TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER NOT NULL,
+             revoked_at INTEGER,
+             rotated_from TEXT
+         );
+
          CREATE TABLE IF NOT EXISTS projects (
              project_key TEXT PRIMARY KEY,
              project_name TEXT NOT NULL,
@@ -182,7 +194,8 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, rusqlite::Error> {
          CREATE INDEX IF NOT EXISTS idx_push_job_items_job ON push_job_items (job_id, status);
          CREATE INDEX IF NOT EXISTS idx_delivery_targets_channel ON delivery_targets (channel, status);
          CREATE INDEX IF NOT EXISTS idx_user_agent_preferences 
-             ON user_agent_preferences (channel, account_scope, peer_id);",
+             ON user_agent_preferences (channel, account_scope, peer_id);
+         CREATE INDEX IF NOT EXISTS idx_api_clients_project ON api_clients (project_id, revoked_at, expires_at);",
     )?;
 
     Ok(conn)
@@ -209,6 +222,7 @@ mod tests {
         assert!(tables.contains(&"dead_letter".to_string()));
         assert!(tables.contains(&"conversation_state".to_string()));
         assert!(tables.contains(&"audit_log".to_string()));
+        assert!(tables.contains(&"api_clients".to_string()));
         assert!(tables.contains(&"projects".to_string()));
         assert!(tables.contains(&"delivery_targets".to_string()));
         assert!(tables.contains(&"project_bindings".to_string()));

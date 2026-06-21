@@ -17,53 +17,40 @@ use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use crate::adapters::api_client_registry::{ApiClientRegistry, AuthFailure};
+
 /// Liveness probe path that is intentionally left unauthenticated.
 pub const HEALTH_PATH: &str = "/api/health";
+/// Feishu webhook path uses provider token/signature verification instead of
+/// bearer auth.
+pub const FEISHU_WEBHOOK_PATH: &str = "/api/feishu/webhook";
 
 /// Configured authentication state for the HTTP adapter.
 #[derive(Clone)]
 pub struct HttpAuth {
-    /// The expected bearer token. Empty means "closed by default".
-    pub token: String,
+    pub registry: Arc<ApiClientRegistry>,
 }
 
 impl HttpAuth {
-    pub fn new(token: impl Into<String>) -> Self {
-        Self { token: token.into() }
+    pub fn new(registry: Arc<ApiClientRegistry>) -> Self {
+        Self { registry }
     }
 }
 
-/// Constant-time byte comparison to avoid leaking the token via timing.
-///
-/// The length is compared first, which only reveals token length — acceptable
-/// for this threat model.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathAuthPolicy {
+    Public,
+    Scoped(&'static str),
+    Deny,
 }
 
-/// Decide whether a request is authorized given the configured token and the
-/// raw `Authorization` header value.
-///
-/// Returns `false` (closed) when the expected token is empty, the header is
-/// absent, not a `Bearer` scheme, or does not match.
-pub fn is_bearer_authorized(expected: &str, auth_header: Option<&str>) -> bool {
-    if expected.is_empty() {
-        return false;
+fn auth_policy_for_path(path: &str) -> PathAuthPolicy {
+    match path {
+        HEALTH_PATH | FEISHU_WEBHOOK_PATH => PathAuthPolicy::Public,
+        "/api/send" => PathAuthPolicy::Scoped("send"),
+        "/api/window_status" => PathAuthPolicy::Scoped("window_status"),
+        _ => PathAuthPolicy::Deny,
     }
-    let Some(value) = auth_header else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    constant_time_eq(token.trim().as_bytes(), expected.as_bytes())
 }
 
 /// Axum middleware enforcing bearer-token auth on every route except the
@@ -73,50 +60,55 @@ pub async fn require_bearer_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    if request.uri().path() == HEALTH_PATH {
-        return next.run(request).await;
-    }
-
     let header_value = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    if is_bearer_authorized(&auth.token, header_value) {
-        next.run(request).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    match auth_policy_for_path(request.uri().path()) {
+        PathAuthPolicy::Public => next.run(request).await,
+        PathAuthPolicy::Scoped(required_scope) => match auth.registry.authorize_bearer(header_value, required_scope) {
+            Ok(_) => next.run(request).await,
+            Err(AuthFailure::Forbidden) => (StatusCode::FORBIDDEN, "forbidden").into_response(),
+            Err(AuthFailure::Unauthorized) => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        },
+        PathAuthPolicy::Deny => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::api_client_registry::ApiClientRegistry;
+    use crate::infrastructure::db::{init_db, DbPool};
+    use std::sync::Arc;
 
     #[test]
-    fn empty_token_is_closed_by_default() {
-        assert!(!is_bearer_authorized("", Some("Bearer anything")));
-        assert!(!is_bearer_authorized("", None));
+    fn path_auth_policy_maps_known_routes() {
+        assert_eq!(auth_policy_for_path(HEALTH_PATH), PathAuthPolicy::Public);
+        assert_eq!(auth_policy_for_path(FEISHU_WEBHOOK_PATH), PathAuthPolicy::Public);
+        assert_eq!(auth_policy_for_path("/api/send"), PathAuthPolicy::Scoped("send"));
+        assert_eq!(auth_policy_for_path("/api/window_status"), PathAuthPolicy::Scoped("window_status"));
+        assert_eq!(auth_policy_for_path("/api/unknown"), PathAuthPolicy::Deny);
     }
 
     #[test]
-    fn missing_or_malformed_header_is_rejected() {
-        assert!(!is_bearer_authorized("secret", None));
-        assert!(!is_bearer_authorized("secret", Some("secret")));
-        assert!(!is_bearer_authorized("secret", Some("Basic secret")));
-        assert!(!is_bearer_authorized("secret", Some("Bearer wrong")));
+    fn registry_auth_distinguishes_scope_errors() {
+        let conn = init_db(":memory:").unwrap();
+        let registry = ApiClientRegistry::new(DbPool::new(conn));
+        let issued = registry.issue_token("proj", "client", &["send".into()], 3600, None).unwrap();
+        let auth = HttpAuth::new(Arc::new(registry));
+
+        let authorized = auth
+            .registry
+            .authorize_bearer(Some(&format!("Bearer {}", issued.raw_token)), "send")
+            .unwrap();
+        assert_eq!(authorized.project_id, "proj");
+
+        assert!(matches!(
+            auth.registry.authorize_bearer(Some(&format!("Bearer {}", issued.raw_token)), "window_status"),
+            Err(AuthFailure::Forbidden)
+        ));
     }
 
-    #[test]
-    fn matching_bearer_token_is_authorized() {
-        assert!(is_bearer_authorized("secret", Some("Bearer secret")));
-        assert!(is_bearer_authorized("secret", Some("Bearer  secret ")));
-    }
-
-    #[test]
-    fn constant_time_eq_matches_std_eq() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
-    }
 }

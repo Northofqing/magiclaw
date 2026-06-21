@@ -13,23 +13,23 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use aiclaw::adapters::conversation_store::ConversationStore;
-use aiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
-use aiclaw::core::ai::backend::AiBackend;
-use aiclaw::core::ai::resilient::ResilientAiBackend;
-use aiclaw::core::pipeline::ai::AiMiddleware;
-use aiclaw::core::pipeline::formatter::Formatter;
-use aiclaw::core::pipeline::normalize::Normalize;
-use aiclaw::core::pipeline::outbox::OutboxStage;
-use aiclaw::core::pipeline::Pipeline;
-use aiclaw::core::resilience::circuit_breaker::{BreakerConfig, CircuitState};
-use aiclaw::core::resilience::gate::ResilienceGate;
-use aiclaw::domain::entities::message::{Direction, Message, MessageContent};
-use aiclaw::domain::ports::conversation_queue::ConversationQueue;
-use aiclaw::domain::ports::outbox_repo::OutboxRepo;
-use aiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
-use aiclaw::infrastructure::config::AppConfig;
-use aiclaw::infrastructure::db::{init_db, DbPool};
+use magiclaw::adapters::conversation_store::ConversationStore;
+use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
+use magiclaw::core::ai::backend::AiBackend;
+use magiclaw::core::ai::resilient::ResilientAiBackend;
+use magiclaw::core::pipeline::ai::AiMiddleware;
+use magiclaw::core::pipeline::formatter::Formatter;
+use magiclaw::core::pipeline::normalize::Normalize;
+use magiclaw::core::pipeline::outbox::OutboxStage;
+use magiclaw::core::pipeline::Pipeline;
+use magiclaw::core::resilience::circuit_breaker::{BreakerConfig, CircuitState};
+use magiclaw::core::resilience::gate::ResilienceGate;
+use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
+use magiclaw::domain::ports::conversation_queue::ConversationQueue;
+use magiclaw::domain::ports::outbox_repo::OutboxRepo;
+use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
+use magiclaw::infrastructure::config::AppConfig;
+use magiclaw::infrastructure::db::{init_db, DbPool};
 
 struct CountingFailBackend {
     calls: Arc<AtomicUsize>,

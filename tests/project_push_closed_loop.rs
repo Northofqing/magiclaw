@@ -2,10 +2,10 @@
 //! -> outbox worker -> sent, exercising the main project-push closed loop with a
 //! real SQLite database and the recoverable-delivery outbox path.
 
-use aiclaw::application::binding::{import_bindings_csv, import_bindings_jsonl, list_bindings};
-use aiclaw::application::push::{import_pushes, parse_pushes_csv, parse_pushes_jsonl, run_push_job};
-use aiclaw::application::audit::query_audit_logs;
-use aiclaw::infrastructure::db::{init_db, DbPool};
+use magiclaw::application::binding::{import_bindings_csv, import_bindings_jsonl, list_bindings};
+use magiclaw::application::push::{import_pushes, parse_pushes_csv, parse_pushes_jsonl, run_push_job};
+use magiclaw::application::audit::query_audit_logs;
+use magiclaw::infrastructure::db::{init_db, DbPool};
 
 fn pool() -> DbPool {
     DbPool::new(init_db(":memory:").unwrap())
@@ -13,7 +13,7 @@ fn pool() -> DbPool {
 
 fn write_temp(name: &str, content: &str) -> String {
     let mut path = std::env::temp_dir();
-    path.push(format!("aiclaw_test_{}_{}", std::process::id(), name));
+    path.push(format!("magiclaw_test_{}_{}", std::process::id(), name));
     std::fs::write(&path, content).unwrap();
     path.to_string_lossy().into_owned()
 }

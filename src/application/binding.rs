@@ -1,6 +1,6 @@
 //! Project ↔ delivery-target binding store and file import (Phase A).
 //!
-//! Projects are owned by an external system; aiclaw only caches the project key
+//! Projects are owned by an external system; magiclaw only caches the project key
 //! and stores the many-to-many binding between a project and cross-platform
 //! delivery targets. See docs/2026-06-19-project-binding-and-multi-push-design.md.
 

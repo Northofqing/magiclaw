@@ -10,12 +10,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use aiclaw::channels::registry::ChannelRegistry;
-use aiclaw::channels::wechat::channel::WeChatChannel;
-use aiclaw::channels::wechat::media::ResilientMediaUploader;
-use aiclaw::domain::entities::message::MessageContent;
-use aiclaw::domain::ports::media::{MediaError, MediaRef, MediaSource, MediaUploader};
-use aiclaw::domain::value_objects::route_key::ChannelId;
+use magiclaw::channels::registry::ChannelRegistry;
+use magiclaw::channels::wechat::channel::WeChatChannel;
+use magiclaw::channels::wechat::media::ResilientMediaUploader;
+use magiclaw::domain::entities::message::MessageContent;
+use magiclaw::domain::ports::media::{MediaError, MediaRef, MediaSource, MediaUploader};
+use magiclaw::domain::value_objects::route_key::ChannelId;
 use async_trait::async_trait;
 
 /// Fake uploader recording how the source was streamed.
@@ -53,7 +53,7 @@ impl MediaUploader for RecordingUploader {
 
 fn temp_file(bytes: &[u8]) -> PathBuf {
     let mut path = std::env::temp_dir();
-    path.push(format!("aiclaw_cl_{}.bin", uuid::Uuid::new_v4()));
+    path.push(format!("magiclaw_cl_{}.bin", uuid::Uuid::new_v4()));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(bytes).unwrap();
     path
@@ -107,7 +107,7 @@ async fn missing_source_surfaces_stage_tagged_error() {
             &ChannelId::new("wechat"),
             "peer_a",
             &MessageContent::File {
-                url: "file:///no/such/aiclaw_missing.bin".into(),
+                url: "file:///no/such/magiclaw_missing.bin".into(),
                 name: "x.bin".into(),
                 size: 1,
             },

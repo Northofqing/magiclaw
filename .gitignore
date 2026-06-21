@@ -2,3 +2,5 @@
 /.claude
 /.vscode
 /data
+.env
+.env.local

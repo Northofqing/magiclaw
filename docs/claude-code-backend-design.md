@@ -80,7 +80,7 @@ claude -p "<prompt>" --output-format json --permission-mode plan
   }
   ```
   `AppConfig` 增加 `pub ai: AiConfig`(serde default,旧配置零改动可加载)。
-- `src/main.rs::load_runtime_config` 增加环境变量覆盖 `AICLAW_AI_BACKEND`(与现有 `AICLAW_API_TOKEN` 写法一致),便于快速切换/回滚。
+- `src/main.rs::load_runtime_config` 增加环境变量覆盖 `MAGICLAW_AI_BACKEND`(与现有 `MAGICLAW_API_TOKEN` 写法一致),便于快速切换/回滚。
 
 ### 3.3 运行时装配(唯一接线变更)
 - `src/infrastructure/runtime.rs` 第 119–120 行,把写死的 `EchoBackend` 改为**工厂选择**:
@@ -149,7 +149,7 @@ claude -p "<prompt>" --output-format json --permission-mode plan
 | `core/ai/` 置放约定 | 沿用先例 | spawn 进程虽属 I/O,但 `openai.rs`/`claude.rs` 同类先例已在 `core/ai/`,遵循既有约定 |
 | `runtime.rs` 装配 | 改 | 唯一接线点:工厂选择后端 |
 | `config.rs` | 改(加 `AiConfig`) | serde default,旧配置兼容 |
-| `main.rs::load_runtime_config` | 改(加 env 覆盖) | 与 `AICLAW_API_TOKEN` 同模式 |
+| `main.rs::load_runtime_config` | 改(加 env 覆盖) | 与 `MAGICLAW_API_TOKEN` 同模式 |
 
 确认无"应接入却遗漏"的同类旧模块。
 
@@ -157,7 +157,7 @@ claude -p "<prompt>" --output-format json --permission-mode plan
 
 ## 7. 回滚方案
 
-- **配置回滚(零代码)**:`AICLAW_AI_BACKEND=echo` 或配置 `ai.backend="echo"`,即刻回到当前行为;默认值本就是 echo,误配置/未配置都安全。
+- **配置回滚(零代码)**:`MAGICLAW_AI_BACKEND=echo` 或配置 `ai.backend="echo"`,即刻回到当前行为;默认值本就是 echo,误配置/未配置都安全。
 - **代码回滚**:改动为**纯增量**(新增 `claude_code.rs` + `AiConfig` + 工厂一行)。`git revert` 工厂接线 + 删除新文件即可;`EchoBackend` 主路径不受影响。
 - **无数据迁移**:不涉及 schema、Outbox、recovery、DLQ、audit 字段变更(模型未改),故无"半升级"风险。
 
@@ -189,7 +189,7 @@ claude -p "<prompt>" --output-format json --permission-mode plan
 
 > 解决四角挑战 A1/A2/C1/C2/D3:成本、延迟体验、隐私、单一职责。
 
-- **默认关闭**:`ai.backend` 默认 `echo`;`claude_code` 为显式 opt-in(配置或 `AICLAW_AI_BACKEND=claude_code`)。
+- **默认关闭**:`ai.backend` 默认 `echo`;`claude_code` 为显式 opt-in(配置或 `MAGICLAW_AI_BACKEND=claude_code`)。
 - **触发门控不在后端内**(满足单一职责 D3):由 pipeline 既有中间件承担——
   - **Permission(白名单)**:非白名单 peer 根本不进入 AI 步骤,从源头控成本+隐私。
   - **RateLimit**(建议接入):启用 claude_code 时建议把 `RateLimit` 接入 pipeline,做每会话/全局频率与成本上限(作为独立改动,不阻塞本特性闭环)。

@@ -7,14 +7,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aiclaw::adapters::conversation_store::ConversationStore;
-use aiclaw::adapters::sqlite_conversation_state::SqliteConversationStateRepo;
-use aiclaw::domain::entities::message::{Direction, Message, MessageContent};
-use aiclaw::domain::ports::conversation_queue::{ConversationGC, ConversationQueue};
-use aiclaw::domain::ports::conversation_state_repo::ConversationStateRepo;
-use aiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
-use aiclaw::infrastructure::config::AppConfig;
-use aiclaw::infrastructure::db::{init_db, DbPool};
+use magiclaw::adapters::conversation_store::ConversationStore;
+use magiclaw::adapters::sqlite_conversation_state::SqliteConversationStateRepo;
+use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
+use magiclaw::domain::ports::conversation_queue::{ConversationGC, ConversationQueue};
+use magiclaw::domain::ports::conversation_state_repo::ConversationStateRepo;
+use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
+use magiclaw::infrastructure::config::AppConfig;
+use magiclaw::infrastructure::db::{init_db, DbPool};
 
 fn make_route_key() -> RouteKey {
     RouteKey::new(

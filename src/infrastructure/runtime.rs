@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::State;
+use axum::middleware::from_fn_with_state;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
@@ -9,6 +10,8 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::conversation_store::ConversationStore;
+use crate::adapters::api_client_registry::ApiClientRegistry;
+use crate::adapters::http_auth::{require_bearer_auth, HttpAuth};
 use crate::adapters::moka_dedup::MokaDedupCache;
 use crate::adapters::sqlite_audit::SqliteAuditSink;
 use crate::adapters::sqlite_conversation_state::SqliteConversationStateRepo;
@@ -23,7 +26,9 @@ use crate::application::outbox_worker::{self, OutboxMessageSender};
 use crate::application::resilient_sender::ResilientOutboxSender;
 use crate::application::route_message::{self, RouteOutcome};
 use crate::channels::dingtalk::channel::DingtalkChannel;
-use crate::channels::feishu::channel::FeishuChannel;
+use crate::channels::feishu::channel::{
+    parse_webhook_event, verify_webhook_signature, FeishuChannel, FeishuWebhookDispatch,
+};
 use crate::channels::registry::ChannelRegistry;
 use crate::channels::wechat::channel::WeChatChannel;
 use crate::core::ai::backend::AiBackend;
@@ -47,11 +52,14 @@ use crate::channels::wechat::ilink::{
 use crate::domain::entities::message::MessageContent;
 use crate::domain::ports::conversation_queue::ConversationQueue;
 use crate::domain::ports::conversation_state_repo::ConversationStateRepo;
+use crate::domain::ports::inbox_repo::RepoError;
+use crate::domain::ports::audit_sink::AuditSink;
 use crate::domain::ports::sync_buf_store::SyncBufStore;
 use crate::domain::storage::outbox::{OutboxEntry, RetryConfig};
 use crate::domain::value_objects::route_key::RouteKey;
-use crate::infrastructure::config::AppConfig;
+use crate::infrastructure::config::{AppConfig, FeishuConfig};
 use crate::infrastructure::db::{self, DbPool};
+use crate::infrastructure::daily_logger::DailyLogger;
 
 pub struct AppRuntime {
     pub config: AppConfig,
@@ -60,11 +68,53 @@ pub struct AppRuntime {
     pub outbox_repo: Arc<SqliteOutboxRepo>,
     pub dead_letter_repo: Arc<SqliteDeadLetterRepo>,
     pub channel_registry: Arc<ChannelRegistry>,
+    api_client_registry: Arc<ApiClientRegistry>,
     dedup_cache: Arc<MokaDedupCache>,
     sync_buf_store: Arc<SqliteSyncBufStore>,
     audit_sink: Arc<SqliteAuditSink>,
     conversation_state_repo: Arc<SqliteConversationStateRepo>,
     send_gate: Arc<ResilienceGate>,
+}
+
+fn extract_feishu_verification_token(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .or_else(|| {
+            payload
+                .get("header")
+                .and_then(|h| h.get("token"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string())
+        })
+}
+
+fn select_feishu_config<'a>(configs: &'a [FeishuConfig], payload: &serde_json::Value) -> Option<&'a FeishuConfig> {
+    if configs.is_empty() {
+        return None;
+    }
+
+    if let Some(token) = extract_feishu_verification_token(payload) {
+        if let Some(cfg) = configs
+            .iter()
+            .find(|c| !c.verification_token.trim().is_empty() && c.verification_token.trim() == token)
+        {
+            return Some(cfg);
+        }
+    }
+
+    if configs.len() == 1 {
+        return configs.first();
+    }
+
+    configs
+        .iter()
+        .find(|c| c.verification_token.trim().is_empty())
 }
 
 struct RegistryOutboxSender {
@@ -95,7 +145,7 @@ impl OutboxMessageSender for RegistryOutboxSender {
 impl AppRuntime {
     pub fn new(config: AppConfig) -> Result<Self, Box<dyn std::error::Error>> {
         // Keep persistent state under the configured DB path and create the
-        // parent directory on demand, so the default `data/aiclaw.db` works in
+        // parent directory on demand, so the default `data/magiclaw.db` works in
         // a fresh checkout without any manual mkdir step.
         if config.db_path != ":memory:" {
             let db_path = std::path::Path::new(&config.db_path);
@@ -108,6 +158,7 @@ impl AppRuntime {
 
         let conn = db::init_db(&config.db_path)?;
         let db_pool = DbPool::new(conn);
+        let api_client_registry = Arc::new(ApiClientRegistry::new(db_pool.clone()));
 
         let dedup_cache = Arc::new(MokaDedupCache::new(
             config.dedup_ttl_secs,
@@ -240,7 +291,10 @@ impl AppRuntime {
             Some(sync_buf_store.clone()),
         )));
         registry.register(Arc::new(DingtalkChannel::new()));
-        registry.register(Arc::new(FeishuChannel::new()));
+        registry.register(Arc::new(FeishuChannel::from_config(config.feishu.clone())));
+        for feishu_cfg in &config.feishu_accounts {
+            registry.register(Arc::new(FeishuChannel::from_config(feishu_cfg.clone())));
+        }
 
         Ok(Self {
             config,
@@ -249,6 +303,7 @@ impl AppRuntime {
             outbox_repo,
             dead_letter_repo,
             channel_registry: Arc::new(registry),
+            api_client_registry,
             dedup_cache,
             sync_buf_store,
             audit_sink,
@@ -380,8 +435,10 @@ impl AppRuntime {
             }
 
             fn should_refresh(&self) -> bool {
-                const MAX_TOKEN_AGE_SECS: u64 = 25;
-                const MAX_SENDS_PER_TOKEN: u32 = 8;
+                // Context tokens are short-lived but not second-level. Using an
+                // aggressive 25s cutoff causes false "window expired" prechecks.
+                const MAX_TOKEN_AGE_SECS: u64 = 25 * 60;
+                const MAX_SENDS_PER_TOKEN: u32 = 30;
 
                 self.stale
                     || self.observed_at.elapsed() >= std::time::Duration::from_secs(MAX_TOKEN_AGE_SECS)
@@ -419,8 +476,14 @@ impl AppRuntime {
         #[derive(Clone)]
         struct HttpApiState {
             wechat: crate::infrastructure::config::WeChatConfig,
+            feishu_configs: Vec<crate::infrastructure::config::FeishuConfig>,
             sync_buf_store: Arc<SqliteSyncBufStore>,
             token_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, PeerTokenState>>>,
+            inbox_repo: Arc<SqliteInboxRepo>,
+            dedup_cache: Arc<MokaDedupCache>,
+            conversation_store: Arc<ConversationStore>,
+            logger: Arc<DailyLogger>,
+            audit_sink: Arc<SqliteAuditSink>,
         }
 
         #[derive(Clone, Deserialize)]
@@ -439,6 +502,19 @@ impl AppRuntime {
         }
 
         #[derive(Serialize)]
+        struct FeishuWebhookResponse {
+            ok: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            challenge: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duplicate: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ignored: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error: Option<String>,
+        }
+
+        #[derive(Serialize)]
         struct WindowStatusEntry {
             peer_id: String,
             observed_age_secs: u64,
@@ -452,6 +528,20 @@ impl AppRuntime {
         struct WindowStatusResponse {
             ok: bool,
             peers: Vec<WindowStatusEntry>,
+        }
+
+        #[derive(Serialize)]
+        struct TokenStatusEntry {
+            peer_id: String,
+            token_age_secs: u64,
+            last_update_ts_secs: i64,
+            is_stale: bool,
+        }
+
+        #[derive(Serialize)]
+        struct TokenStatusResponse {
+            ok: bool,
+            tokens: Vec<TokenStatusEntry>,
         }
 
         fn is_context_expired_error(err: &str) -> bool {
@@ -504,27 +594,50 @@ impl AppRuntime {
 
             let token = extract_latest_context_token(&updates.msgs, Some(peer_id))?;
             let mut cache = state.token_cache.lock().await;
-                let entry = PeerTokenState::new(token);
+                let entry = PeerTokenState::new(token.clone());
                 tracing::info!(peer_id = %peer_id, "wechat peer token refreshed from getupdates");
+                state.logger.log_token_refresh(peer_id, 0, "long-poll");
+                state.audit_sink.record(None, "token_refresh", &format!(
+                    "source=long-poll,peer_id={},trigger=getupdates",
+                    peer_id
+                ));
                 cache.insert(peer_id.to_string(), entry.clone());
                 Some(entry)
         }
 
+        let log_dir = std::path::Path::new(&self.config.db_path)
+            .parent()
+            .map(|p| p.join("logs"))
+            .unwrap_or_else(|| std::path::PathBuf::from("logs"));
+        let logger = Arc::new(DailyLogger::new(&log_dir)
+            .unwrap_or_else(|_| DailyLogger::new("logs").unwrap()));
+
         let state = Arc::new(HttpApiState {
             wechat: self.config.wechat.clone(),
+            feishu_configs: {
+                let mut all = Vec::new();
+                all.push(self.config.feishu.clone());
+                all.extend(self.config.feishu_accounts.clone());
+                all
+            },
             sync_buf_store: self.sync_buf_store.clone(),
             token_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            inbox_repo: self.inbox_repo.clone(),
+            dedup_cache: self.dedup_cache.clone(),
+            conversation_store: self.conversation_store.clone(),
+            logger,
+            audit_sink: self.audit_sink.clone(),
         });
 
-        // Short-interval token probe: runs every 25 seconds with a fast getupdates
-        // (2-second timeout). Complements the 40-second long-poll by proactively
-        // refreshing per-peer token cache so sends after a quiet period don't block.
-        // Uses short timeout so it never delays itself — if no messages arrive within
-        // 2 seconds it moves on and retries 25 seconds later.
+        // Short-interval token probe: runs with a fast getupdates (2-second timeout).
+        // When peers are active or stale we probe every 25s; when the cache is idle
+        // we back off to the WeChat-safe ceiling of 35s to avoid burning calls on
+        // empty windows without exceeding the platform's token window.
         if state.wechat.enabled && !state.wechat.token.trim().is_empty() {
             let probe_state = state.clone();
             tokio::spawn(async move {
-                const PROBE_INTERVAL_SECS: u64 = 25;
+            const ACTIVE_PROBE_INTERVAL_SECS: u64 = 25;
+                const IDLE_PROBE_INTERVAL_SECS: u64 = 35;
                 const PROBE_TIMEOUT_MS: u64 = 2_000;
 
                 let probe_cfg = ILinkSendConfig {
@@ -537,9 +650,10 @@ impl AppRuntime {
                     keepalive_timeout_ms: PROBE_TIMEOUT_MS,
                 };
                 let client = reqwest::Client::new();
+                let mut next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
 
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(PROBE_INTERVAL_SECS)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(next_probe_secs)).await;
 
                     let sync_buf = probe_state
                         .sync_buf_store
@@ -569,6 +683,11 @@ impl AppRuntime {
                                 }
                                 let mut cache = probe_state.token_cache.lock().await;
                                 cache.insert(uid.to_string(), PeerTokenState::new(token.clone()));
+                                probe_state.logger.log_token_refresh(uid, 0, "probe");
+                                probe_state.audit_sink.record(None, "token_refresh", &format!(
+                                    "source=probe,peer_id={},trigger=getupdates",
+                                    uid
+                                ));
                                 refreshed += 1;
                             }
 
@@ -577,6 +696,7 @@ impl AppRuntime {
                                     refreshed = refreshed,
                                     "wechat token probe: refreshed peer tokens"
                                 );
+                                next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
                             } else {
                                 // No inbound messages in probe window; mark all stale peers so
                                 // next /api/send will do a proper long-poll refresh instead of
@@ -590,11 +710,15 @@ impl AppRuntime {
                                         stale_count = stale_count,
                                         "wechat token probe: no new messages, stale peers detected"
                                     );
+                                    next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
+                                } else {
+                                    next_probe_secs = IDLE_PROBE_INTERVAL_SECS;
                                 }
                             }
                         }
                         Err(e) => {
                             tracing::debug!(error = %e, "wechat token probe: getupdates returned error (benign)");
+                            next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
                         }
                     }
                 }
@@ -669,6 +793,11 @@ impl AppRuntime {
                                     if !uid.trim().is_empty() && uid != poll_state.wechat.account_id {
                                         let mut cache = poll_state.token_cache.lock().await;
                                         cache.insert(uid.to_string(), PeerTokenState::new(token.clone()));
+                                        poll_state.logger.log_token_refresh(uid, 0, "long-poll");
+                                        poll_state.audit_sink.record(None, "token_refresh", &format!(
+                                            "source=long-poll,peer_id={},trigger=inbound",
+                                            uid
+                                        ));
                                         tracing::debug!(peer_id = %uid, "wechat peer token refreshed from long-poll");
                                         updated += 1;
                                     }
@@ -729,6 +858,8 @@ impl AppRuntime {
             });
         }
 
+        let auth = Arc::new(HttpAuth::new(self.api_client_registry.clone()));
+
         let app: Router = Router::new()
             .route(
                 "/api/send",
@@ -751,7 +882,10 @@ impl AppRuntime {
                         }
 
                         let client = reqwest::Client::new();
-                        let should_refresh = selected_ctx.is_none()
+                        // Proactively refresh when the cached token is stale/old.
+                        // The previous condition only refreshed when selected_ctx was None,
+                        // which skipped refresh for stale cached entries and caused avoidable ret=-2.
+                        let should_refresh = req.context_token.is_none()
                             && cache_entry
                                 .as_ref()
                                 .map(|entry| entry.should_refresh())
@@ -771,6 +905,9 @@ impl AppRuntime {
                         }
 
                         if let Some(ctx) = selected_ctx {
+                            const MAX_CONTEXT_RETRY_ATTEMPTS: usize = 3;
+                            const CONTEXT_RETRY_DELAYS_MS: [u64; 2] = [1_500, 3_000];
+
                             let base_cfg = ILinkSendConfig {
                                 base_url: state.wechat.base_url.clone(),
                                 token: state.wechat.token.clone(),
@@ -780,29 +917,44 @@ impl AppRuntime {
                                 timeout_ms: state.wechat.timeout_ms,
                                 keepalive_timeout_ms: state.wechat.keepalive_timeout_ms,
                             };
-                            match send_text_via_ilink(&client, &base_cfg, &req.to, &req.text).await {
-                                Ok(resp) => {
-                                    let next_ctx = extract_context_token_from_send_response(&resp);
-                                    if let Ok(mut cache) = state.token_cache.try_lock() {
-                                        let entry = cache
-                                            .entry(req.to.clone())
-                                            .or_insert_with(|| PeerTokenState::new(ctx.clone()));
-                                        entry.mark_success(next_ctx);
-                                        tracing::debug!(
-                                            peer_id = %req.to,
-                                            observed_age_secs = entry.observed_age_secs(),
-                                            send_count = entry.send_count,
-                                            stale = entry.stale,
-                                            "wechat peer token send succeeded"
+                            let mut active_token = ctx.clone();
+                            let mut last_err: Option<String> = None;
+
+                            for attempt in 0..MAX_CONTEXT_RETRY_ATTEMPTS {
+                                let mut send_cfg = base_cfg.clone();
+                                send_cfg.context_token = active_token.clone();
+
+                                match send_text_via_ilink(&client, &send_cfg, &req.to, &req.text).await {
+                                    Ok(resp) => {
+                                        let next_ctx = extract_context_token_from_send_response(&resp);
+                                        if let Ok(mut cache) = state.token_cache.try_lock() {
+                                            let entry = cache
+                                                .entry(req.to.clone())
+                                                .or_insert_with(|| PeerTokenState::new(active_token.clone()));
+                                            entry.mark_success(next_ctx);
+                                            tracing::debug!(
+                                                peer_id = %req.to,
+                                                observed_age_secs = entry.observed_age_secs(),
+                                                send_count = entry.send_count,
+                                                stale = entry.stale,
+                                                attempt = attempt + 1,
+                                                "wechat peer token send succeeded"
+                                            );
+                                        }
+                                        return (
+                                            StatusCode::OK,
+                                            Json(SendResponse { ok: true, error: None }),
                                         );
                                     }
-                                    return (
-                                        StatusCode::OK,
-                                        Json(SendResponse { ok: true, error: None }),
-                                    );
-                                }
-                                Err(e) => {
-                                    if is_context_expired_error(&e) {
+                                    Err(e) => {
+                                        last_err = Some(e.clone());
+                                        if !is_context_expired_error(&e) {
+                                            return (
+                                                StatusCode::BAD_GATEWAY,
+                                                Json(SendResponse { ok: false, error: Some(e) }),
+                                            );
+                                        }
+
                                         {
                                             let mut cache = state.token_cache.lock().await;
                                             if let Some(entry) = cache.get_mut(&req.to) {
@@ -811,55 +963,56 @@ impl AppRuntime {
                                                     peer_id = %req.to,
                                                     observed_age_secs = entry.observed_age_secs(),
                                                     send_count = entry.send_count,
+                                                    attempt = attempt + 1,
                                                     "wechat peer token marked stale after ret=-2"
                                                 );
                                             }
                                         }
 
+                                        if attempt + 1 >= MAX_CONTEXT_RETRY_ATTEMPTS {
+                                            break;
+                                        }
+
+                                        let delay_ms = CONTEXT_RETRY_DELAYS_MS
+                                            .get(attempt)
+                                            .copied()
+                                            .unwrap_or(*CONTEXT_RETRY_DELAYS_MS.last().unwrap_or(&3_000));
+                                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+
                                         if let Some(refreshed) = fetch_context_token_for_peer(&state, &client, &req.to).await {
-                                            let mut retry_cfg = base_cfg.clone();
-                                            retry_cfg.context_token = refreshed.token.clone();
-                                            match send_text_via_ilink(&client, &retry_cfg, &req.to, &req.text).await {
-                                                Ok(resp) => {
-                                                    let next_ctx = extract_context_token_from_send_response(&resp);
-                                                    let mut cache = state.token_cache.lock().await;
-                                                    let entry = cache
-                                                        .entry(req.to.clone())
-                                                        .or_insert(refreshed);
-                                                    entry.mark_success(next_ctx);
-                                                    return (
-                                                        StatusCode::OK,
-                                                        Json(SendResponse { ok: true, error: None }),
-                                                    );
-                                                }
-                                                Err(retry_err) => {
-                                                    let mut cache = state.token_cache.lock().await;
-                                                    if let Some(entry) = cache.get_mut(&req.to) {
-                                                        entry.mark_stale();
-                                                        tracing::warn!(
-                                                            peer_id = %req.to,
-                                                            observed_age_secs = entry.observed_age_secs(),
-                                                            send_count = entry.send_count,
-                                                            "wechat peer token retry failed and remains stale"
-                                                        );
-                                                    }
-                                                    return (
-                                                        StatusCode::BAD_GATEWAY,
-                                                        Json(SendResponse {
-                                                            ok: false,
-                                                            error: Some(retry_err),
-                                                        }),
-                                                    );
-                                                }
-                                            }
+                                            active_token = refreshed.token.clone();
+                                            state.logger.log_token_refresh(&req.to, 0, "send");
+                                            state.audit_sink.record(None, "token_refresh", &format!(
+                                                "source=send,peer_id={},trigger=ret_minus_2",
+                                                &req.to
+                                            ));
+                                            tracing::info!(
+                                                peer_id = %req.to,
+                                                attempt = attempt + 1,
+                                                delay_ms = delay_ms,
+                                                "wechat peer token refreshed for retry"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                peer_id = %req.to,
+                                                attempt = attempt + 1,
+                                                delay_ms = delay_ms,
+                                                "wechat peer token not refreshed before retry"
+                                            );
                                         }
                                     }
-                                    return (
-                                        StatusCode::BAD_GATEWAY,
-                                        Json(SendResponse { ok: false, error: Some(e) }),
-                                    );
                                 }
                             }
+
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(SendResponse {
+                                    ok: false,
+                                    error: Some(last_err.unwrap_or_else(|| {
+                                        "wechat send failed after context retry window".to_string()
+                                    })),
+                                }),
+                            );
                         }
 
                         (
@@ -876,8 +1029,202 @@ impl AppRuntime {
                 ),
             )
             .route(
+                "/api/token_status",
+                get(|State(state): State<Arc<HttpApiState>>| async move {
+                    let cache = state.token_cache.lock().await;
+                    let now = chrono::Utc::now().timestamp();
+                    let mut tokens: Vec<TokenStatusEntry> = cache
+                        .iter()
+                        .map(|(peer_id, entry)| TokenStatusEntry {
+                            peer_id: peer_id.clone(),
+                            token_age_secs: entry.observed_age_secs(),
+                            last_update_ts_secs: now,
+                            is_stale: entry.stale,
+                        })
+                        .collect();
+                    tokens.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+
+                    (
+                        StatusCode::OK,
+                        Json(TokenStatusResponse {
+                            ok: true,
+                            tokens,
+                        }),
+                    )
+                }),
+            )
+            .route(
                 "/api/health",
                 get(|| async { (StatusCode::OK, Json(serde_json::json!({"ok": true}))) }),
+            )
+            .route(
+                "/api/feishu/webhook",
+                post(
+                    |State(state): State<Arc<HttpApiState>>,
+                     headers: axum::http::HeaderMap,
+                     body: axum::body::Bytes| async move {
+                        let payload: serde_json::Value = match serde_json::from_slice(body.as_ref()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(FeishuWebhookResponse {
+                                        ok: false,
+                                        challenge: None,
+                                        duplicate: None,
+                                        ignored: None,
+                                        error: Some(format!("invalid feishu webhook JSON: {}", e)),
+                                    }),
+                                );
+                            }
+                        };
+
+                        let Some(feishu_cfg) = select_feishu_config(&state.feishu_configs, &payload) else {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(FeishuWebhookResponse {
+                                    ok: false,
+                                    challenge: None,
+                                    duplicate: None,
+                                    ignored: None,
+                                    error: Some("no matching feishu account config for webhook".to_string()),
+                                }),
+                            );
+                        };
+
+                        if let Err(e) = verify_webhook_signature(&headers, body.as_ref(), feishu_cfg) {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                Json(FeishuWebhookResponse {
+                                    ok: false,
+                                    challenge: None,
+                                    duplicate: None,
+                                    ignored: None,
+                                    error: Some(e),
+                                }),
+                            );
+                        }
+
+                        let dispatch = match parse_webhook_event(payload, feishu_cfg) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return (
+                                    StatusCode::UNAUTHORIZED,
+                                    Json(FeishuWebhookResponse {
+                                        ok: false,
+                                        challenge: None,
+                                        duplicate: None,
+                                        ignored: None,
+                                        error: Some(e),
+                                    }),
+                                );
+                            }
+                        };
+
+                        match dispatch {
+                            FeishuWebhookDispatch::UrlVerification { challenge } => (
+                                StatusCode::OK,
+                                Json(FeishuWebhookResponse {
+                                    ok: true,
+                                    challenge: Some(challenge),
+                                    duplicate: None,
+                                    ignored: None,
+                                    error: None,
+                                }),
+                            ),
+                            FeishuWebhookDispatch::Ignore => (
+                                StatusCode::OK,
+                                Json(FeishuWebhookResponse {
+                                    ok: true,
+                                    challenge: None,
+                                    duplicate: None,
+                                    ignored: Some(true),
+                                    error: None,
+                                }),
+                            ),
+                            FeishuWebhookDispatch::Message(msg) => {
+                                let dedup_message_id = msg.id.clone();
+                                match inbox_processor::process_inbound(state.inbox_repo.as_ref(), &msg) {
+                                    Ok(inbox_processor::InboxResult::Duplicate) => (
+                                        StatusCode::OK,
+                                        Json(FeishuWebhookResponse {
+                                            ok: true,
+                                            challenge: None,
+                                            duplicate: Some(true),
+                                            ignored: None,
+                                            error: None,
+                                        }),
+                                    ),
+                                    Ok(inbox_processor::InboxResult::Processed) => {
+                                        let route_outcome = route_message::route_message(
+                                            state.dedup_cache.as_ref(),
+                                            state.conversation_store.as_ref(),
+                                            msg,
+                                        );
+                                        match route_outcome {
+                                            RouteOutcome::Enqueued => (
+                                                StatusCode::OK,
+                                                Json(FeishuWebhookResponse {
+                                                    ok: true,
+                                                    challenge: None,
+                                                    duplicate: Some(false),
+                                                    ignored: None,
+                                                    error: None,
+                                                }),
+                                            ),
+                                            RouteOutcome::Duplicate => (
+                                                StatusCode::OK,
+                                                Json(FeishuWebhookResponse {
+                                                    ok: true,
+                                                    challenge: None,
+                                                    duplicate: Some(true),
+                                                    ignored: None,
+                                                    error: None,
+                                                }),
+                                            ),
+                                            RouteOutcome::Dropped(message_id) => (
+                                                StatusCode::SERVICE_UNAVAILABLE,
+                                                Json(FeishuWebhookResponse {
+                                                    ok: false,
+                                                    challenge: None,
+                                                    duplicate: Some(false),
+                                                    ignored: None,
+                                                    error: Some(format!(
+                                                        "feishu route queue full, dropped message_id={}",
+                                                        message_id
+                                                    )),
+                                                }),
+                                            ),
+                                        }
+                                    }
+                                    Err(RepoError::Db(e)) => (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(FeishuWebhookResponse {
+                                            ok: false,
+                                            challenge: None,
+                                            duplicate: None,
+                                            ignored: None,
+                                            error: Some(format!(
+                                                "failed to persist feishu inbound message {}: {}",
+                                                dedup_message_id, e
+                                            )),
+                                        }),
+                                    ),
+                                    Err(RepoError::NotFound(e)) => (
+                                        StatusCode::NOT_FOUND,
+                                        Json(FeishuWebhookResponse {
+                                            ok: false,
+                                            challenge: None,
+                                            duplicate: None,
+                                            ignored: None,
+                                            error: Some(e),
+                                        }),
+                                    ),
+                                }
+                            }
+                        }
+                    },
+                ),
             )
             .route(
                 "/api/window_status",
@@ -905,7 +1252,8 @@ impl AppRuntime {
                     )
                 }),
             )
-            .with_state(state);
+            .with_state(state)
+            .layer(from_fn_with_state(auth, require_bearer_auth));
 
         let addr: std::net::SocketAddr = addr
             .parse()

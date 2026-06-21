@@ -15,29 +15,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aiclaw::adapters::conversation_store::ConversationStore;
-use aiclaw::adapters::sqlite_audit::SqliteAuditSink;
-use aiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
-use aiclaw::application::audit::query_audit_logs;
-use aiclaw::core::ai::backend::AiBackend;
-use aiclaw::core::ai::claude_code::ClaudeCodeBackend;
-use aiclaw::core::pipeline::ai::AiMiddleware;
-use aiclaw::core::pipeline::formatter::Formatter;
-use aiclaw::core::pipeline::normalize::Normalize;
-use aiclaw::core::pipeline::outbox::OutboxStage;
-use aiclaw::core::pipeline::permission::Permission;
-use aiclaw::core::pipeline::Pipeline;
-use aiclaw::domain::entities::message::{Direction, Message, MessageContent};
-use aiclaw::domain::ports::audit_sink::AuditSink;
-use aiclaw::domain::ports::conversation_queue::ConversationQueue;
-use aiclaw::domain::ports::outbox_repo::OutboxRepo;
-use aiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
-use aiclaw::infrastructure::config::{AppConfig, ClaudeCodeConfig};
-use aiclaw::infrastructure::db::{init_db, DbPool};
+use magiclaw::adapters::conversation_store::ConversationStore;
+use magiclaw::adapters::sqlite_audit::SqliteAuditSink;
+use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
+use magiclaw::application::audit::query_audit_logs;
+use magiclaw::core::ai::backend::AiBackend;
+use magiclaw::core::ai::claude_code::ClaudeCodeBackend;
+use magiclaw::core::pipeline::ai::AiMiddleware;
+use magiclaw::core::pipeline::formatter::Formatter;
+use magiclaw::core::pipeline::normalize::Normalize;
+use magiclaw::core::pipeline::outbox::OutboxStage;
+use magiclaw::core::pipeline::permission::Permission;
+use magiclaw::core::pipeline::Pipeline;
+use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
+use magiclaw::domain::ports::audit_sink::AuditSink;
+use magiclaw::domain::ports::conversation_queue::ConversationQueue;
+use magiclaw::domain::ports::outbox_repo::OutboxRepo;
+use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
+use magiclaw::infrastructure::config::{AppConfig, ClaudeCodeConfig};
+use magiclaw::infrastructure::db::{init_db, DbPool};
 
 fn write_stub(name: &str, body: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "aiclaw_cc_closed_loop_{}_{}",
+        "magiclaw_cc_closed_loop_{}_{}",
         std::process::id(),
         name
     ));
@@ -103,8 +103,9 @@ async fn claude_code_backend_reply_reaches_outbox_with_audit() {
         audit.clone() as Arc<dyn AuditSink>,
         outbox.clone() as Arc<dyn OutboxRepo>,
     );
-
-    let store = ConversationStore::new(256, 1800, 0, Some(pipeline), AppConfig::default(), None);
+    let mut app_config = AppConfig::default();
+    app_config.ai.backend = "claude_code".to_string();
+    let store = ConversationStore::new(256, 1800, 0, Some(pipeline), app_config, None);
 
     let key = RouteKey::new(
         ChannelId::new("wechat"),

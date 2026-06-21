@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn initialize_returns_capabilities() {
-        let handler = ProtocolHandler::new("aiclaw", "0.1.0");
+        let handler = ProtocolHandler::new("magiclaw", "0.1.0");
         let resp = handler.handle_initialize(Value::Number(1.into()), &None);
         assert!(resp.result.is_some());
         let result = resp.result.unwrap();
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn tools_list_returns_definitions() {
-        let handler = ProtocolHandler::new("aiclaw", "0.1.0");
+        let handler = ProtocolHandler::new("magiclaw", "0.1.0");
         let resp = handler.handle_tools_list(Value::Number(1.into()));
         assert!(resp.result.is_some());
         let tools = &resp.result.unwrap()["tools"];
@@ -168,7 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_send_succeeds() {
-        let handler = ProtocolHandler::new("aiclaw", "0.1.0");
+        let handler = ProtocolHandler::new("magiclaw", "0.1.0");
         let outbox = make_outbox();
         let params = serde_json::json!({
             "name": "send",
@@ -186,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_unknown_tool_returns_error() {
-        let handler = ProtocolHandler::new("aiclaw", "0.1.0");
+        let handler = ProtocolHandler::new("magiclaw", "0.1.0");
         let outbox = make_outbox();
         let params = serde_json::json!({
             "name": "nonexistent",

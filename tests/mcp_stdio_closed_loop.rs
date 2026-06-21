@@ -16,12 +16,12 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn mcp_stdio_initialize_and_tools_list_over_real_binary() {
-    let data_dir = std::env::temp_dir().join("aiclaw_mcp_test_wd");
+    let data_dir = std::env::temp_dir().join("magiclaw_mcp_test_wd");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let work_dir = std::env::temp_dir().join("aiclaw_mcp_test_cwd");
+    let work_dir = std::env::temp_dir().join("magiclaw_mcp_test_cwd");
     std::fs::create_dir_all(&work_dir).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_aiclaw"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_magiclaw"))
         .arg("--mcp")
         .current_dir(&work_dir)
         .env("WECHAT_CHANNEL_DIR", &data_dir)
@@ -30,7 +30,7 @@ fn mcp_stdio_initialize_and_tools_list_over_real_binary() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn aiclaw --mcp");
+        .expect("failed to spawn magiclaw --mcp");
 
     // Single-line JSON is accepted by the transport. Closing stdin signals EOF,
     // which makes the server shut down gracefully.

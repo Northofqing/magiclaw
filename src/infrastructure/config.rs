@@ -47,6 +47,58 @@ impl Default for WeChatConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuConfig {
+    /// Enable real Feishu OpenAPI sending for the feishu channel.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Logical account identifier. Used to isolate multi-account channel IDs.
+    /// "default" maps to channel id "feishu".
+    #[serde(default = "default_feishu_account_id")]
+    pub account_id: String,
+    /// Feishu OpenAPI base URL, default: https://open.feishu.cn
+    #[serde(default = "default_feishu_base_url")]
+    pub base_url: String,
+    /// Internal app id (for tenant token exchange).
+    #[serde(default)]
+    pub app_id: String,
+    /// Internal app secret (for tenant token exchange).
+    #[serde(default)]
+    pub app_secret: String,
+    /// Optional pre-issued tenant_access_token. If empty, runtime exchanges via app_id/app_secret.
+    #[serde(default)]
+    pub tenant_access_token: String,
+    /// receive_id_type query param for send endpoint: open_id/user_id/chat_id/union_id/email.
+    #[serde(default = "default_feishu_receive_id_type")]
+    pub receive_id_type: String,
+    /// Optional webhook verification token for inbound event validation.
+    #[serde(default)]
+    pub verification_token: String,
+    /// Optional webhook signing secret (encrypt key) for X-Lark-Signature validation.
+    #[serde(default)]
+    pub signing_secret: String,
+    /// HTTP timeout in milliseconds.
+    #[serde(default = "default_feishu_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            account_id: default_feishu_account_id(),
+            base_url: default_feishu_base_url(),
+            app_id: String::new(),
+            app_secret: String::new(),
+            tenant_access_token: String::new(),
+            receive_id_type: default_feishu_receive_id_type(),
+            verification_token: String::new(),
+            signing_secret: String::new(),
+            timeout_ms: default_feishu_timeout_ms(),
+        }
+    }
+}
+
 /// Configuration for the local Claude Code CLI backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeCodeConfig {
@@ -209,15 +261,17 @@ pub struct AppConfig {
     #[serde(default = "default_db_path")]
     pub db_path: String,
 
-    /// Bearer token required by the REST/HTTP adapter. Empty means the
-    /// protected endpoints are closed (no naked default-open port) — only
-    /// the unauthenticated liveness probe stays reachable.
-    #[serde(default)]
-    pub api_auth_token: String,
-
     /// WeChat channel runtime configuration.
     #[serde(default)]
     pub wechat: WeChatConfig,
+
+    /// Feishu channel runtime configuration.
+    #[serde(default)]
+    pub feishu: FeishuConfig,
+
+    /// Additional Feishu accounts for multi-account isolation.
+    #[serde(default)]
+    pub feishu_accounts: Vec<FeishuConfig>,
 
     /// AI backend configuration.
     #[serde(default)]
@@ -244,7 +298,7 @@ fn default_gc_scan_interval_secs() -> u64 {
     60
 }
 fn default_db_path() -> String {
-    "data/aiclaw.db".into()
+    "data/magiclaw.db".into()
 }
 fn default_wechat_channel_version() -> String {
     "0.1.0".into()
@@ -257,6 +311,18 @@ fn default_wechat_timeout_ms() -> u64 {
 }
 fn default_wechat_keepalive_timeout_ms() -> u64 {
     4_000
+}
+fn default_feishu_base_url() -> String {
+    "https://open.feishu.cn".into()
+}
+fn default_feishu_account_id() -> String {
+    "default".into()
+}
+fn default_feishu_receive_id_type() -> String {
+    "open_id".into()
+}
+fn default_feishu_timeout_ms() -> u64 {
+    15_000
 }
 fn default_ai_backend() -> String {
     "echo".into()
@@ -319,8 +385,9 @@ impl Default for AppConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             gc_scan_interval_secs: default_gc_scan_interval_secs(),
             db_path: default_db_path(),
-            api_auth_token: String::new(),
             wechat: WeChatConfig::default(),
+            feishu: FeishuConfig::default(),
+            feishu_accounts: Vec::new(),
             ai: AiConfig::default(),
             agent: AgentConfig::default(),
         }
@@ -346,7 +413,7 @@ mod tests {
         // to the echo backend (rollback-safe, no behaviour change).
         let cfg: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.ai.backend, "echo");
-        assert_eq!(cfg.db_path, "data/aiclaw.db");
+        assert_eq!(cfg.db_path, "data/magiclaw.db");
     }
 
     #[test]

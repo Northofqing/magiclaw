@@ -1,5 +1,5 @@
 [package]
-name = "aiclaw"
+name = "magiclaw"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,10 +15,14 @@ thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
 axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
 rand = "0.8"
 base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+tokio-util = { version = "0.7", features = ["io"] }
 aes = "0.8"
 cipher = "0.4"
 fs2 = "0.4"
+dotenvy = "0.15"

@@ -16,29 +16,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aiclaw::adapters::conversation_store::ConversationStore;
-use aiclaw::adapters::sqlite_audit::SqliteAuditSink;
-use aiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
-use aiclaw::application::audit::query_audit_logs;
-use aiclaw::core::ai::backend::AiBackend;
-use aiclaw::core::ai::cli_agent::CliAgentBackend;
-use aiclaw::core::pipeline::ai::AiMiddleware;
-use aiclaw::core::pipeline::formatter::Formatter;
-use aiclaw::core::pipeline::normalize::Normalize;
-use aiclaw::core::pipeline::outbox::OutboxStage;
-use aiclaw::core::pipeline::permission::Permission;
-use aiclaw::core::pipeline::Pipeline;
-use aiclaw::domain::entities::message::{Direction, Message, MessageContent};
-use aiclaw::domain::ports::audit_sink::AuditSink;
-use aiclaw::domain::ports::conversation_queue::ConversationQueue;
-use aiclaw::domain::ports::outbox_repo::OutboxRepo;
-use aiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
-use aiclaw::infrastructure::config::{AppConfig, CliAgentConfig};
-use aiclaw::infrastructure::db::{init_db, DbPool};
+use magiclaw::adapters::conversation_store::ConversationStore;
+use magiclaw::adapters::sqlite_audit::SqliteAuditSink;
+use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
+use magiclaw::application::audit::query_audit_logs;
+use magiclaw::core::ai::backend::AiBackend;
+use magiclaw::core::ai::cli_agent::CliAgentBackend;
+use magiclaw::core::pipeline::ai::AiMiddleware;
+use magiclaw::core::pipeline::formatter::Formatter;
+use magiclaw::core::pipeline::normalize::Normalize;
+use magiclaw::core::pipeline::outbox::OutboxStage;
+use magiclaw::core::pipeline::permission::Permission;
+use magiclaw::core::pipeline::Pipeline;
+use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
+use magiclaw::domain::ports::audit_sink::AuditSink;
+use magiclaw::domain::ports::conversation_queue::ConversationQueue;
+use magiclaw::domain::ports::outbox_repo::OutboxRepo;
+use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
+use magiclaw::infrastructure::config::{AppConfig, CliAgentConfig};
+use magiclaw::infrastructure::db::{init_db, DbPool};
 
 fn write_stub(tag: &str, name: &str, body: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "aiclaw_cli_agent_loop_{}_{}",
+        "magiclaw_cli_agent_loop_{}_{}",
         std::process::id(),
         tag
     ));
@@ -109,7 +109,9 @@ async fn cli_agent_output_file_reply_reaches_outbox_with_audit() {
         audit as Arc<dyn AuditSink>,
         outbox.clone() as Arc<dyn OutboxRepo>,
     );
-    let store = ConversationStore::new(256, 1800, 0, Some(pipeline), AppConfig::default(), None);
+    let mut app_config = AppConfig::default();
+    app_config.ai.backend = "codex".to_string();
+    let store = ConversationStore::new(256, 1800, 0, Some(pipeline), app_config, None);
 
     let key = RouteKey::new(
         ChannelId::new("wechat"),
@@ -165,7 +167,9 @@ async fn cli_agent_missing_binary_degrades_without_panic() {
         audit as Arc<dyn AuditSink>,
         outbox.clone() as Arc<dyn OutboxRepo>,
     );
-    let store = ConversationStore::new(256, 1800, 0, Some(pipeline), AppConfig::default(), None);
+    let mut app_config = AppConfig::default();
+    app_config.ai.backend = "hermes".to_string();
+    let store = ConversationStore::new(256, 1800, 0, Some(pipeline), app_config, None);
 
     let key = RouteKey::new(
         ChannelId::new("wechat"),

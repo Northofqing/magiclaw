@@ -1,3 +1,4 @@
+pub mod api_client_registry;
 pub mod conversation_store;
 pub mod http_auth;
 pub mod mcp;

@@ -49,11 +49,11 @@ flowchart LR
 ## T3 · 运行时装配:工厂 + 环境变量
 - **改动**:
   - `src/infrastructure/runtime.rs`(~119 行):`match config.ai.backend { "claude_code" => ClaudeCodeBackend::new(...), _ => EchoBackend }`,再包 `ResilientAiBackend`。
-  - `src/main.rs::load_runtime_config`:`AICLAW_AI_BACKEND` 环境变量覆盖 `config.ai.backend`(与 `AICLAW_API_TOKEN` 同模式)。
+  - `src/main.rs::load_runtime_config`:`MAGICLAW_AI_BACKEND` 环境变量覆盖 `config.ai.backend`(与 `MAGICLAW_API_TOKEN` 同模式)。
 - **红线**:0.2 运行时装配(接入唯一组合根,不留"已实现无调用方");回滚安全(默认 echo)。
 - **验收 DoD**:
   - 默认/未知值 → echo(单测 factory)。
-  - `AICLAW_AI_BACKEND=claude_code` → 装配 claude_code(单测)。
+  - `MAGICLAW_AI_BACKEND=claude_code` → 装配 claude_code(单测)。
   - `cargo test` + clippy + `cargo build --release` 通过。
 - **依赖**:T1、T2。
 
@@ -66,7 +66,7 @@ flowchart LR
 - **依赖**:T3。
 
 ## T5 · 闭环集成测试(合并 Gate)
-- **改动**:`tests/claude_code_backend_closed_loop.rs`。临时 PATH 注入桩 `claude` 脚本(确定性回复,不联网);`AICLAW_AI_BACKEND=claude_code`。
+- **改动**:`tests/claude_code_backend_closed_loop.rs`。临时 PATH 注入桩 `claude` 脚本(确定性回复,不联网);`MAGICLAW_AI_BACKEND=claude_code`。
 - **红线**:0.3 验收与测试(主闭环系统级测试作为 Gate)。
 - **验收 DoD**:
   - **主闭环**:投喂一条入站 text → 断言 outbox 投递内容 = 桩回复(非 `[echo]`)。
@@ -76,7 +76,7 @@ flowchart LR
 - **依赖**:T3、T4。
 
 ## T6 · 文档 + 能力分级
-- **改动**:更新部署/使用说明(如何启用 `AICLAW_AI_BACKEND=claude_code`、成本/延迟/隐私须知);在 PR 标注本能力为 `closed`(满足主链路接入 + 闭环测试 + 红线)。
+- **改动**:更新部署/使用说明(如何启用 `MAGICLAW_AI_BACKEND=claude_code`、成本/延迟/隐私须知);在 PR 标注本能力为 `closed`(满足主链路接入 + 闭环测试 + 红线)。
 - **红线**:0.4 能力分级(仅 `closed` 计入完成度)。
 - **验收 DoD**:文档落地;PR checklist 勾选;旧模块接入检查表(§设计 6)逐项确认。
 - **依赖**:T5。

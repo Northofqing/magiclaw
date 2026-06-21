@@ -3,6 +3,7 @@ use crate::domain::ports::inbox_repo::{RepoError, RepoResult};
 use crate::domain::storage::dead_letter::DeadLetterEntry;
 use crate::domain::storage::outbox::OutboxEntry;
 use crate::infrastructure::db::DbPool;
+use rusqlite::OptionalExtension;
 
 pub struct SqliteDeadLetterRepo {
     db: DbPool,
@@ -56,12 +57,33 @@ impl DeadLetterRepo for SqliteDeadLetterRepo {
             conn.execute("DELETE FROM dead_letter WHERE id = ?1", rusqlite::params![id])?;
 
             let now = chrono::Utc::now().timestamp();
-            conn.execute(
-                "INSERT INTO outbox (id, route_key, payload, status, retry_count, created_at, updated_at) VALUES (?1, 'replayed', ?2, 'pending', 0, ?3, ?3)",
-                rusqlite::params![id, dl.payload, now],
-            )?;
 
-            Ok(OutboxEntry::new(id, "replayed", dl.payload, now))
+            let existing_route_key: Option<String> = conn
+                .query_row(
+                    "SELECT route_key FROM outbox WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if existing_route_key.is_some() {
+                conn.execute(
+                    "UPDATE outbox SET status='pending', retry_count=0, next_retry_at=NULL, last_error=NULL, payload=?2, updated_at=?3 WHERE id=?1",
+                    rusqlite::params![id, dl.payload, now],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO outbox (id, route_key, payload, status, retry_count, created_at, updated_at) VALUES (?1, 'replayed', ?2, 'pending', 0, ?3, ?3)",
+                    rusqlite::params![id, dl.payload, now],
+                )?;
+            }
+
+            Ok(OutboxEntry::new(
+                id,
+                existing_route_key.unwrap_or_else(|| "replayed".to_string()),
+                dl.payload,
+                now,
+            ))
         }).map_err(RepoError::Db)
     }
 }

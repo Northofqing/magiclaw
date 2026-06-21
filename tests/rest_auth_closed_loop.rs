@@ -3,18 +3,21 @@
 //! Verifies, over a real TCP server, that the bearer-token middleware:
 //!   - leaves the `/api/health` liveness probe open,
 //!   - rejects protected requests with no / wrong token (401),
-//!   - accepts protected requests carrying the correct bearer token (200),
-//!   - stays closed by default when no token is configured.
+//!   - rejects scope-mismatched tokens with 403,
+//!   - accepts protected requests carrying a valid scoped token (200).
 
 use std::sync::Arc;
 
-use aiclaw::adapters::http_auth::{require_bearer_auth, HttpAuth};
+use magiclaw::adapters::api_client_registry::ApiClientRegistry;
+use magiclaw::adapters::http_auth::{require_bearer_auth, HttpAuth};
+use magiclaw::infrastructure::db::{init_db, DbPool};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::net::TcpListener;
 
-async fn spawn(token: &str) -> (String, tokio::task::JoinHandle<()>) {
-    let auth = Arc::new(HttpAuth::new(token.to_string()));
+async fn spawn() -> (String, tokio::task::JoinHandle<()>, ApiClientRegistry) {
+    let registry = ApiClientRegistry::new(DbPool::new(init_db(":memory:").unwrap()));
+    let auth = Arc::new(HttpAuth::new(Arc::new(registry.clone())));
     let app = Router::new()
         .route(
             "/api/send",
@@ -34,13 +37,22 @@ async fn spawn(token: &str) -> (String, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{}", addr), handle)
+    (format!("http://{}", addr), handle, registry)
 }
 
 #[tokio::test]
 async fn health_is_open_protected_requires_token() {
-    let (base, handle) = spawn("s3cret").await;
+    let (base, handle, registry) = spawn().await;
     let client = reqwest::Client::new();
+    let issued = registry
+        .issue_token(
+            "proj-a",
+            "rest-test-client",
+            &["send".to_string()],
+            3600,
+            None,
+        )
+        .unwrap();
 
     // Liveness probe is reachable without auth.
     let health = client.get(format!("{}/api/health", base)).send().await.unwrap();
@@ -68,19 +80,28 @@ async fn health_is_open_protected_requires_token() {
     // Correct token => 200.
     let ok = client
         .post(format!("{}/api/send", base))
-        .header("Authorization", "Bearer s3cret")
+        .header("Authorization", format!("Bearer {}", issued.raw_token))
         .json(&serde_json::json!({"to": "peer", "text": "hi"}))
         .send()
         .await
         .unwrap();
     assert_eq!(ok.status(), 200);
 
+    // Scope mismatch should return forbidden.
+    let forbidden = client
+        .get(format!("{}/api/window_status", base))
+        .header("Authorization", format!("Bearer {}", issued.raw_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
     handle.abort();
 }
 
 #[tokio::test]
-async fn empty_token_keeps_protected_endpoints_closed() {
-    let (base, handle) = spawn("").await;
+async fn unknown_token_keeps_protected_endpoints_closed() {
+    let (base, handle, _registry) = spawn().await;
     let client = reqwest::Client::new();
 
     // Health still open.

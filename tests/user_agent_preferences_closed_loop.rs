@@ -6,15 +6,15 @@
 //! 3. Future messages use the saved preference
 //! 4. AiMiddleware respects the user's agent selection
 
-use aiclaw::application::agent_preferences;
-use aiclaw::core::pipeline::agent_command_middleware::AgentCommandMiddleware;
-use aiclaw::core::pipeline::agent_command::AgentCommandParser;
-use aiclaw::core::pipeline::middleware::{Middleware, PipelineContext};
-use aiclaw::domain::entities::message::{Direction, Message, MessageContent};
-use aiclaw::domain::aggregates::conversation::Conversation;
-use aiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
-use aiclaw::infrastructure::config::{AppConfig, default_agent_aliases};
-use aiclaw::infrastructure::db::{self, DbPool};
+use magiclaw::application::agent_preferences;
+use magiclaw::core::pipeline::agent_command_middleware::AgentCommandMiddleware;
+use magiclaw::core::pipeline::agent_command::AgentCommandParser;
+use magiclaw::core::pipeline::middleware::{Middleware, PipelineContext};
+use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
+use magiclaw::domain::aggregates::conversation::Conversation;
+use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
+use magiclaw::infrastructure::config::{AppConfig, default_agent_aliases};
+use magiclaw::infrastructure::db::{self, DbPool};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -27,9 +27,6 @@ async fn test_user_agent_preference_closed_loop() {
     // Create config with agent aliases
     let mut config = AppConfig::default();
     config.agent.enable_user_preferences = true;
-    
-    // Create parser with default aliases
-    let parser = AgentCommandParser::new(default_agent_aliases());
     
     // Create middleware
     let middleware = AgentCommandMiddleware::new(db_pool.clone(), config.agent.clone());

@@ -253,7 +253,7 @@ mod tests {
 
     fn temp_file(bytes: &[u8]) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("aiclaw_media_{}.bin", uuid::Uuid::new_v4()));
+        path.push(format!("magiclaw_media_{}.bin", uuid::Uuid::new_v4()));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
         path
@@ -310,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_is_source_error() {
-        let err = FileMediaSource::new(PathBuf::from("/no/such/aiclaw_x.bin"), 512, 0)
+        let err = FileMediaSource::new(PathBuf::from("/no/such/magiclaw_x.bin"), 512, 0)
             .await
             .unwrap_err();
         assert!(matches!(err, MediaError::Source(_)));

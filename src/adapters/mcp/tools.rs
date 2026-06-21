@@ -265,9 +265,15 @@ impl ToolDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::sync::Arc;
     use crate::adapters::sqlite_outbox::SqliteOutboxRepo;
     use crate::infrastructure::db::{init_db, DbPool};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn make_outbox() -> Arc<SqliteOutboxRepo> {
         Arc::new(SqliteOutboxRepo::new(DbPool::new(init_db(":memory:").unwrap())))
@@ -325,7 +331,7 @@ mod tests {
     }
 
     fn make_temp_wechat_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aiclaw-mcp-tools-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("magiclaw-mcp-tools-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("account.json"),
@@ -340,12 +346,15 @@ mod tests {
         dir
     }
 
-    struct TestDirGuard;
+    struct TestDirGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
 
     impl TestDirGuard {
         fn new(path: PathBuf) -> Self {
+            let lock = env_lock().lock().unwrap();
             env::set_var("WECHAT_CHANNEL_DIR", path);
-            Self
+            Self { _lock: lock }
         }
     }
 

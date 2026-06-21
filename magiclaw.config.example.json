@@ -1,5 +1,5 @@
 {
-  "db_path": "data/aiclaw.db",
+  "db_path": "data/magiclaw.db",
   "wechat": {
     "enabled": true,
     "base_url": "https://ilinkai.weixin.qq.com",
