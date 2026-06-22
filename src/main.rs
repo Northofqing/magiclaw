@@ -87,7 +87,14 @@ struct ProjectWechatAccount {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nEnvironment:\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)"
+    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nEnvironment:\n  MAGICLAW_DB_PATH     SQLite database path shared by daemon and auth commands\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)\n  MAGICLAW_API_TOKEN    Optional bearer token for localhost daemon /api/send and /api/window_status"
+}
+fn resolve_db_path() -> String {
+    env::var("MAGICLAW_DB_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| AppConfig::default().db_path)
 }
 
 fn default_wechat_data_dir() -> PathBuf {
@@ -132,6 +139,16 @@ fn load_project_context_tokens(data_dir: &Path) -> Result<std::collections::Hash
     let content = fs::read_to_string(&ctx_path)?;
     let tokens: HashMap<String, String> = serde_json::from_str(&content)?;
     Ok(tokens)
+}
+
+fn save_project_context_tokens(
+    data_dir: &Path,
+    tokens: &std::collections::HashMap<String, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ctx_path = data_dir.join("context_tokens.json");
+    let content = serde_json::to_string_pretty(tokens)?;
+    fs::write(&ctx_path, format!("{}\n", content))?;
+    Ok(())
 }
 
 fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
@@ -366,7 +383,7 @@ fn parse_auth_args(args: &[String]) -> Result<AuthCommand, String> {
 
 /// Open the SQLite pool used by the binding/push CLI, creating the parent dir.
 fn open_db_pool() -> Result<magiclaw::infrastructure::db::DbPool, Box<dyn std::error::Error>> {
-    let db_path = AppConfig::default().db_path;
+    let db_path = resolve_db_path();
     if db_path != ":memory:" {
         if let Some(parent) = Path::new(&db_path).parent() {
             if !parent.as_os_str().is_empty() {
@@ -506,6 +523,7 @@ fn run_auth_revoke(cmd: &AuthRevokeCommand) -> Result<(), Box<dyn std::error::Er
 
 fn load_runtime_config() -> AppConfig {
     let mut config = AppConfig::default();
+    config.db_path = resolve_db_path();
     let data_dir = resolve_wechat_data_dir(None);
 
     match load_project_wechat_account(&data_dir) {
@@ -667,7 +685,7 @@ async fn try_daemon_api_send(
     text: &str,
     context_token: Option<&str>,
     api_token: Option<&str>,
-) -> Result<String, DaemonSendError> {
+) -> Result<(String, Option<String>), DaemonSendError> {
     #[derive(Serialize)]
     struct ApiSendRequest<'a> {
         to: &'a str,
@@ -679,16 +697,18 @@ async fn try_daemon_api_send(
     struct ApiSendResponse {
         ok: bool,
         #[serde(default)]
+        context_token: Option<String>,
+        #[serde(default)]
         error: Option<String>,
     }
 
     let url = format!("http://{}/api/send", api_addr);
     let client = reqwest::Client::builder()
-        // /api/send may legitimately block on a long-poll token refresh.
-        // Use a short connect timeout but a much longer request timeout so
-        // the CLI does not misclassify an in-flight refresh as daemon death.
+        // /api/send may legitimately block while waiting for a fresh inbound token.
+        // Keep the request timeout above the daemon wait window so the CLI does
+        // not cut off a valid recovery path too early.
         .connect_timeout(std::time::Duration::from_secs(2))
-        .timeout(std::time::Duration::from_secs(90))
+        .timeout(std::time::Duration::from_secs(360))
         .build()
         .map_err(|e| DaemonSendError::Unreachable(e.to_string()))?;
 
@@ -716,7 +736,7 @@ async fn try_daemon_api_send(
                 last_err = e.to_string();
                 if e.is_timeout() {
                     return Err(DaemonSendError::Rejected(
-                        "daemon send timed out while waiting for token refresh".to_string(),
+                        "daemon send timed out while waiting for inbound token".to_string(),
                     ));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -743,7 +763,7 @@ async fn try_daemon_api_send(
     })?;
 
     if status.is_success() && body.ok {
-        Ok(format!("message_id=<daemon>, to={}", to))
+        Ok((format!("message_id=<daemon>, to={}", to), body.context_token))
     } else {
         Err(DaemonSendError::Rejected(
             body.error
@@ -755,7 +775,7 @@ async fn try_daemon_api_send(
 async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = resolve_wechat_data_dir((!cmd.data_dir.is_empty()).then_some(cmd.data_dir.as_str()));
     let account = load_project_wechat_account(&data_dir)?;
-    let context_tokens = load_project_context_tokens(&data_dir)?;
+    let mut context_tokens = load_project_context_tokens(&data_dir)?;
 
     let recipient = if let Some(to) = cmd.to.as_ref() {
         if to.trim().is_empty() {
@@ -784,16 +804,24 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
     //      and refreshes peer tokens itself.
     //   2. Fall back to direct ilink call using the stored context_token.
     let api_addr = env::var("MAGICLAW_API_ADDR").unwrap_or_else(|_| DEFAULT_API_ADDR.to_string());
+    let api_token = env::var("MAGICLAW_API_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     match try_daemon_api_send(
         &api_addr,
         &recipient,
         &cmd.message,
         (!context_token.is_empty()).then_some(context_token.as_str()),
-        None,
+        api_token.as_deref(),
     )
     .await
     {
-        Ok(result) => {
+        Ok((result, daemon_context_token)) => {
+            if let Some(token) = daemon_context_token.as_deref().map(str::trim).filter(|token| !token.is_empty()) {
+                context_tokens.insert(recipient.clone(), token.to_string());
+                let _ = save_project_context_tokens(&data_dir, &context_tokens);
+            }
             println!("send ok (via daemon): {}", result);
             return Ok(());
         }
@@ -827,6 +855,18 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
     let send_result = send_text_via_ilink(&client, &send_cfg, &recipient, &cmd.message)
         .await
         .map_err(|e| format!("wechat send failed: {}", e))?;
+
+    if let Some(token) = send_result
+        .get("msg")
+        .and_then(|v| v.get("context_token"))
+        .and_then(|v| v.as_str())
+        .or_else(|| send_result.get("context_token").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        context_tokens.insert(recipient.clone(), token.to_string());
+        let _ = save_project_context_tokens(&data_dir, &context_tokens);
+    }
 
     let receipt = magiclaw::channels::channel_trait::SendReceipt {
         message_id: uuid::Uuid::new_v4().to_string(),

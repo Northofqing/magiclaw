@@ -300,18 +300,17 @@ pub async fn send_text_via_ilink(
     let value: serde_json::Value =
         serde_json::from_str(trimmed).map_err(|e| format!("invalid ilink JSON response: {}", e))?;
 
-    if let Some(ret) = value.get("ret").and_then(|v| v.as_i64()) {
-        if ret != 0 {
-            let errcode = value
-                .get("errcode")
-                .and_then(|v| v.as_i64())
-                .unwrap_or_default();
-            let errmsg = value
-                .get("errmsg")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error");
-            return Err(format!("ilink business error: ret={}, errcode={}, errmsg={}", ret, errcode, errmsg));
-        }
+    // We need strict delivery semantics for monitor usage: any non-zero business field
+    // (`ret` or `errcode`) is treated as a send failure to avoid false-positive success logs.
+    // This favors correctness/observability over optimistic acceptance.
+    let ret = value.get("ret").and_then(|v| v.as_i64()).unwrap_or_default();
+    let errcode = value.get("errcode").and_then(|v| v.as_i64()).unwrap_or_default();
+    if ret != 0 || errcode != 0 {
+        let errmsg = value
+            .get("errmsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("ilink business error: ret={}, errcode={}, errmsg={}", ret, errcode, errmsg));
     }
 
     Ok(value)
@@ -729,6 +728,89 @@ mod tests {
         assert_eq!(body["msg"]["context_token"], "ctx-1");
         assert_eq!(body["msg"]["item_list"][0]["text_item"]["text"], "hello world");
         assert_eq!(body["base_info"]["channel_version"], "0.1.0");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn send_text_fails_on_ret_minus_2() {
+        // Strict semantics: non-zero `ret` must surface as a failure to avoid
+        // false-positive "send success" in callers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/ilink/bot/sendmessage",
+                post(|| async {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "ret": -2,
+                            "errmsg": "parameter error"
+                        })),
+                    )
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = reqwest::Client::new();
+        let cfg = ILinkSendConfig {
+            base_url: format!("http://{}", addr),
+            token: "token-1".into(),
+            from_user_id: "bot-user".into(),
+            context_token: "ctx-1".into(),
+            channel_version: "0.1.0".into(),
+            timeout_ms: 2_000,
+            keepalive_timeout_ms: 2_000,
+        };
+
+        let err = send_text_via_ilink(&client, &cfg, "peer_a", "hello")
+            .await
+            .unwrap_err();
+        assert!(err.contains("ret=-2"), "unexpected error: {err}");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn send_text_fails_on_session_expired_errcode() {
+        // errcode=-14 ("session expired") is the only real failure signal on the send
+        // path; it must surface as an error so the caller's outbox/DLQ can retry/relogin.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/ilink/bot/sendmessage",
+                post(|| async {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "ret": 0,
+                            "errcode": -14,
+                            "errmsg": "session expired"
+                        })),
+                    )
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = reqwest::Client::new();
+        let cfg = ILinkSendConfig {
+            base_url: format!("http://{}", addr),
+            token: "token-1".into(),
+            from_user_id: "bot-user".into(),
+            context_token: "ctx-1".into(),
+            channel_version: "0.1.0".into(),
+            timeout_ms: 2_000,
+            keepalive_timeout_ms: 2_000,
+        };
+
+        let err = send_text_via_ilink(&client, &cfg, "peer_a", "hello")
+            .await
+            .unwrap_err();
+        assert!(err.contains("errcode=-14"), "unexpected error: {err}");
 
         handle.abort();
     }

@@ -140,12 +140,40 @@ cargo test
 ./target/release/magiclaw
 ```
 
+> 注意：daemon 是**无参数**默认模式。不要写 `magiclaw daemon`——没有 `daemon` 子命令，会报 `unknown command: daemon` 导致 daemon 根本没起来，随后 `send` 会出现 `error sending request for url .../api/send`（连不上 daemon）。
+
 相关环境变量：
 
+- `MAGICLAW_DB_PATH`：SQLite 数据库路径，**daemon 校验 token、`auth issue` 写 token、`send` 鉴权三者必须指向同一个库**，否则 401
 - `WECHAT_CHANNEL_DIR`：WeChat 数据目录
 - `MAGICLAW_API_ADDR`：HTTP API 地址，默认 `127.0.0.1:18011`
+ - `MAGICLAW_API_TOKEN`：可选，本地 daemon 的 bearer token；`send` 命令会自动读取它
 - `MAGICLAW_AI_BACKEND`：AI 后端选择，默认 `echo`
 - `RUST_LOG`：日志级别，日志只走 stderr
+
+#### 一键启动（推荐）
+
+`scripts/daemon-up.sh` 把「固定 DB 路径 → 对该库签发 token → 写回根目录 `.env` → 启动 daemon」串成一条命令，避免 daemon / `auth issue` / `send` 使用不同库或不同 token 导致的 401。因为启动时会自动加载 `.env`，之后 `send` 也复用同一 DB + token。
+
+```bash
+# 签发新 token 并启动（默认 7 天有效期、DB=<repo>/data/magiclaw.db）
+scripts/daemon-up.sh
+
+# 复用 .env 中已有 token，只启动 daemon
+REUSE_TOKEN=1 scripts/daemon-up.sh
+
+# 自定义参数
+DB_PATH=/abs/path.db TTL_SECS=604800 SCOPES=send,window_status scripts/daemon-up.sh
+```
+
+启动后，从仓库根目录直接发送即可（`.env` 自动提供 DB + token）：
+
+```bash
+cargo run -- send --message "hello"
+# 或
+./target/release/magiclaw send --message "hello"
+```
+
 
 HTTP API 当前端点：
 

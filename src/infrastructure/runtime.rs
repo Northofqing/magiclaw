@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -46,7 +50,7 @@ use crate::core::pipeline::rate_limit::RateLimit;
 use crate::core::pipeline::Pipeline;
 use crate::core::resilience::gate::ResilienceGate;
 use crate::channels::wechat::ilink::{
-    extract_latest_context_token, get_updates_via_ilink, send_text_via_ilink, ILinkGetUpdatesError,
+    get_updates_via_ilink, send_text_via_ilink, ILinkGetUpdatesError,
     ILinkSendConfig,
 };
 use crate::domain::entities::message::MessageContent;
@@ -60,6 +64,58 @@ use crate::domain::value_objects::route_key::RouteKey;
 use crate::infrastructure::config::{AppConfig, FeishuConfig};
 use crate::infrastructure::db::{self, DbPool};
 use crate::infrastructure::daily_logger::DailyLogger;
+
+fn resolve_wechat_data_dir() -> PathBuf {
+    if let Ok(dir) = env::var("WECHAT_CHANNEL_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    let home = env::var("HOME").unwrap_or_default();
+    Path::new(&home).join(".claude").join("channels").join("wechat")
+}
+
+fn persist_context_token(peer_id: &str, token: &str) -> Result<(), String> {
+    let data_dir = resolve_wechat_data_dir();
+    let ctx_path = data_dir.join("context_tokens.json");
+    let temp_path = ctx_path.with_extension("json.tmp");
+
+    if let Some(parent) = ctx_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 context token 目录失败({}): {}", parent.display(), e))?;
+    }
+
+    let mut tokens: HashMap<String, String> = match fs::read_to_string(&ctx_path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|e| format!("解析 context_tokens.json 失败({}): {}", ctx_path.display(), e))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(err) => {
+            return Err(format!("读取 context_tokens.json 失败({}): {}", ctx_path.display(), err));
+        }
+    };
+
+    tokens.insert(peer_id.to_string(), token.to_string());
+    let content = serde_json::to_string_pretty(&tokens)
+        .map_err(|e| format!("序列化 context_tokens.json 失败: {}", e))?;
+
+    fs::write(&temp_path, format!("{}\n", content))
+        .map_err(|e| format!("写入临时 context token 文件失败({}): {}", temp_path.display(), e))?;
+    fs::rename(&temp_path, &ctx_path)
+        .map_err(|e| format!("替换 context_tokens.json 失败({} -> {}): {}", temp_path.display(), ctx_path.display(), e))?;
+
+    Ok(())
+}
+
+fn load_persisted_context_tokens() -> Result<HashMap<String, String>, String> {
+    let data_dir = resolve_wechat_data_dir();
+    let ctx_path = data_dir.join("context_tokens.json");
+
+    match fs::read_to_string(&ctx_path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|e| format!("解析 context_tokens.json 失败({}): {}", ctx_path.display(), e)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(err) => Err(format!("读取 context_tokens.json 失败({}): {}", ctx_path.display(), err)),
+    }
+}
 
 pub struct AppRuntime {
     pub config: AppConfig,
@@ -438,11 +494,9 @@ impl AppRuntime {
                 // Context tokens are short-lived but not second-level. Using an
                 // aggressive 25s cutoff causes false "window expired" prechecks.
                 const MAX_TOKEN_AGE_SECS: u64 = 25 * 60;
-                const MAX_SENDS_PER_TOKEN: u32 = 30;
 
                 self.stale
                     || self.observed_at.elapsed() >= std::time::Duration::from_secs(MAX_TOKEN_AGE_SECS)
-                    || self.send_count >= MAX_SENDS_PER_TOKEN
             }
 
             fn mark_success(&mut self, next_token: Option<String>) {
@@ -460,10 +514,6 @@ impl AppRuntime {
                 self.stale = false;
             }
 
-            fn mark_stale(&mut self) {
-                self.stale = true;
-            }
-
             fn observed_age_secs(&self) -> u64 {
                 self.observed_at.elapsed().as_secs()
             }
@@ -473,12 +523,25 @@ impl AppRuntime {
             }
         }
 
+        let persisted_context_tokens = load_persisted_context_tokens().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to load persisted context tokens");
+            HashMap::new()
+        });
+
+        let mut initial_token_cache = HashMap::new();
+        for (peer_id, token) in persisted_context_tokens {
+            if !token.trim().is_empty() {
+                initial_token_cache.insert(peer_id, PeerTokenState::new(token));
+            }
+        }
+
         #[derive(Clone)]
         struct HttpApiState {
             wechat: crate::infrastructure::config::WeChatConfig,
             feishu_configs: Vec<crate::infrastructure::config::FeishuConfig>,
             sync_buf_store: Arc<SqliteSyncBufStore>,
             token_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<String, PeerTokenState>>>,
+            context_token_persist_lock: Arc<tokio::sync::Mutex<()>>,
             inbox_repo: Arc<SqliteInboxRepo>,
             dedup_cache: Arc<MokaDedupCache>,
             conversation_store: Arc<ConversationStore>,
@@ -497,6 +560,8 @@ impl AppRuntime {
         #[derive(Serialize)]
         struct SendResponse {
             ok: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            context_token: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             error: Option<String>,
         }
@@ -544,11 +609,6 @@ impl AppRuntime {
             tokens: Vec<TokenStatusEntry>,
         }
 
-        fn is_context_expired_error(err: &str) -> bool {
-            let lower = err.to_ascii_lowercase();
-            lower.contains("ret=-2") || lower.contains("context_token") || lower.contains("session")
-        }
-
         fn extract_context_token_from_send_response(value: &serde_json::Value) -> Option<String> {
             value
                 .get("msg")
@@ -562,47 +622,6 @@ impl AppRuntime {
                         .map(|v| v.to_string())
                 })
                 .filter(|v| !v.trim().is_empty())
-        }
-
-        async fn fetch_context_token_for_peer(
-            state: &Arc<HttpApiState>,
-            client: &reqwest::Client,
-            peer_id: &str,
-        ) -> Option<PeerTokenState> {
-            let cfg = ILinkSendConfig {
-                base_url: state.wechat.base_url.clone(),
-                token: state.wechat.token.clone(),
-                from_user_id: state.wechat.account_id.clone(),
-                context_token: String::new(),
-                channel_version: state.wechat.channel_version.clone(),
-                timeout_ms: state.wechat.timeout_ms,
-                keepalive_timeout_ms: state.wechat.keepalive_timeout_ms.max(40_000),
-            };
-            let sync_buf = state
-                .sync_buf_store
-                .load("wechat", &state.wechat.account_id)
-                .ok()
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-                .unwrap_or_default();
-
-            let updates = get_updates_via_ilink(client, &cfg, &sync_buf).await.ok()?;
-            if let Some(buf) = updates.get_updates_buf.as_deref() {
-                let _ = state
-                    .sync_buf_store
-                    .save("wechat", &state.wechat.account_id, buf.as_bytes());
-            }
-
-            let token = extract_latest_context_token(&updates.msgs, Some(peer_id))?;
-            let mut cache = state.token_cache.lock().await;
-                let entry = PeerTokenState::new(token.clone());
-                tracing::info!(peer_id = %peer_id, "wechat peer token refreshed from getupdates");
-                state.logger.log_token_refresh(peer_id, 0, "long-poll");
-                state.audit_sink.record(None, "token_refresh", &format!(
-                    "source=long-poll,peer_id={},trigger=getupdates",
-                    peer_id
-                ));
-                cache.insert(peer_id.to_string(), entry.clone());
-                Some(entry)
         }
 
         let log_dir = std::path::Path::new(&self.config.db_path)
@@ -621,109 +640,14 @@ impl AppRuntime {
                 all
             },
             sync_buf_store: self.sync_buf_store.clone(),
-            token_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            token_cache: Arc::new(tokio::sync::Mutex::new(initial_token_cache)),
+            context_token_persist_lock: Arc::new(tokio::sync::Mutex::new(())),
             inbox_repo: self.inbox_repo.clone(),
             dedup_cache: self.dedup_cache.clone(),
             conversation_store: self.conversation_store.clone(),
             logger,
             audit_sink: self.audit_sink.clone(),
         });
-
-        // Short-interval token probe: runs with a fast getupdates (2-second timeout).
-        // When peers are active or stale we probe every 25s; when the cache is idle
-        // we back off to the WeChat-safe ceiling of 35s to avoid burning calls on
-        // empty windows without exceeding the platform's token window.
-        if state.wechat.enabled && !state.wechat.token.trim().is_empty() {
-            let probe_state = state.clone();
-            tokio::spawn(async move {
-            const ACTIVE_PROBE_INTERVAL_SECS: u64 = 25;
-                const IDLE_PROBE_INTERVAL_SECS: u64 = 35;
-                const PROBE_TIMEOUT_MS: u64 = 2_000;
-
-                let probe_cfg = ILinkSendConfig {
-                    base_url: probe_state.wechat.base_url.clone(),
-                    token: probe_state.wechat.token.clone(),
-                    from_user_id: probe_state.wechat.account_id.clone(),
-                    context_token: String::new(),
-                    channel_version: probe_state.wechat.channel_version.clone(),
-                    timeout_ms: probe_state.wechat.timeout_ms,
-                    keepalive_timeout_ms: PROBE_TIMEOUT_MS,
-                };
-                let client = reqwest::Client::new();
-                let mut next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
-
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(next_probe_secs)).await;
-
-                    let sync_buf = probe_state
-                        .sync_buf_store
-                        .load("wechat", &probe_state.wechat.account_id)
-                        .ok()
-                        .map(|b| String::from_utf8_lossy(&b).to_string())
-                        .unwrap_or_default();
-
-                    match get_updates_via_ilink(&client, &probe_cfg, &sync_buf).await {
-                        Ok(updates) => {
-                            if let Some(buf) = updates.get_updates_buf.as_deref() {
-                                let _ = probe_state
-                                    .sync_buf_store
-                                    .save("wechat", &probe_state.wechat.account_id, buf.as_bytes());
-                            }
-
-                            let mut refreshed = 0usize;
-                            for msg in &updates.msgs {
-                                if msg.message_type != Some(1) {
-                                    continue;
-                                }
-                                let Some(token) = &msg.context_token else { continue };
-                                if token.trim().is_empty() { continue }
-                                let Some(uid) = msg.from_user_id.as_deref() else { continue };
-                                if uid.trim().is_empty() || uid == probe_state.wechat.account_id {
-                                    continue;
-                                }
-                                let mut cache = probe_state.token_cache.lock().await;
-                                cache.insert(uid.to_string(), PeerTokenState::new(token.clone()));
-                                probe_state.logger.log_token_refresh(uid, 0, "probe");
-                                probe_state.audit_sink.record(None, "token_refresh", &format!(
-                                    "source=probe,peer_id={},trigger=getupdates",
-                                    uid
-                                ));
-                                refreshed += 1;
-                            }
-
-                            if refreshed > 0 {
-                                tracing::info!(
-                                    refreshed = refreshed,
-                                    "wechat token probe: refreshed peer tokens"
-                                );
-                                next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
-                            } else {
-                                // No inbound messages in probe window; mark all stale peers so
-                                // next /api/send will do a proper long-poll refresh instead of
-                                // using an expired token.
-                                let stale_count = {
-                                    let cache = probe_state.token_cache.lock().await;
-                                    cache.values().filter(|e| e.should_refresh()).count()
-                                };
-                                if stale_count > 0 {
-                                    tracing::debug!(
-                                        stale_count = stale_count,
-                                        "wechat token probe: no new messages, stale peers detected"
-                                    );
-                                    next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
-                                } else {
-                                    next_probe_secs = IDLE_PROBE_INTERVAL_SECS;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "wechat token probe: getupdates returned error (benign)");
-                            next_probe_secs = ACTIVE_PROBE_INTERVAL_SECS;
-                        }
-                    }
-                }
-            });
-        }
 
         // Start a background long-poll loop to keep context_token hot in memory.
         // This continuously consumes getupdates and updates per-user token cache,
@@ -793,6 +717,11 @@ impl AppRuntime {
                                     if !uid.trim().is_empty() && uid != poll_state.wechat.account_id {
                                         let mut cache = poll_state.token_cache.lock().await;
                                         cache.insert(uid.to_string(), PeerTokenState::new(token.clone()));
+                                        drop(cache);
+                                        let _persist_guard = poll_state.context_token_persist_lock.lock().await;
+                                        if let Err(e) = persist_context_token(uid, &token) {
+                                            tracing::warn!(peer_id = %uid, error = %e, "failed to persist refreshed context token");
+                                        }
                                         poll_state.logger.log_token_refresh(uid, 0, "long-poll");
                                         poll_state.audit_sink.record(None, "token_refresh", &format!(
                                             "source=long-poll,peer_id={},trigger=inbound",
@@ -871,29 +800,16 @@ impl AppRuntime {
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
                             .map(|s| s.to_string());
-                        let mut cache_entry = None;
+                        let cache_entry = {
+                            let cache = state.token_cache.lock().await;
+                            cache.get(&req.to).cloned()
+                        };
 
-                        if selected_ctx.is_none() {
-                            cache_entry = {
-                                let cache = state.token_cache.lock().await;
-                                cache.get(&req.to).cloned()
-                            };
-                            selected_ctx = cache_entry.as_ref().map(|entry| entry.token.clone());
+                        if let Some(entry) = cache_entry.as_ref() {
+                            selected_ctx = Some(entry.token.clone());
                         }
 
                         let client = reqwest::Client::new();
-                        // Proactively refresh when the cached token is stale/old.
-                        // The previous condition only refreshed when selected_ctx was None,
-                        // which skipped refresh for stale cached entries and caused avoidable ret=-2.
-                        let should_refresh = req.context_token.is_none()
-                            && cache_entry
-                                .as_ref()
-                                .map(|entry| entry.should_refresh())
-                                .unwrap_or(true);
-                        if should_refresh {
-                            cache_entry = fetch_context_token_for_peer(&state, &client, &req.to).await;
-                            selected_ctx = cache_entry.as_ref().map(|entry| entry.token.clone());
-                        }
 
                         if selected_ctx.is_none() {
                             selected_ctx = req
@@ -905,10 +821,7 @@ impl AppRuntime {
                         }
 
                         if let Some(ctx) = selected_ctx {
-                            const MAX_CONTEXT_RETRY_ATTEMPTS: usize = 3;
-                            const CONTEXT_RETRY_DELAYS_MS: [u64; 2] = [1_500, 3_000];
-
-                            let base_cfg = ILinkSendConfig {
+                            let send_cfg = ILinkSendConfig {
                                 base_url: state.wechat.base_url.clone(),
                                 token: state.wechat.token.clone(),
                                 from_user_id: state.wechat.account_id.clone(),
@@ -917,108 +830,101 @@ impl AppRuntime {
                                 timeout_ms: state.wechat.timeout_ms,
                                 keepalive_timeout_ms: state.wechat.keepalive_timeout_ms,
                             };
-                            let mut active_token = ctx.clone();
-                            let mut last_err: Option<String> = None;
 
-                            for attempt in 0..MAX_CONTEXT_RETRY_ATTEMPTS {
-                                let mut send_cfg = base_cfg.clone();
-                                send_cfg.context_token = active_token.clone();
-
-                                match send_text_via_ilink(&client, &send_cfg, &req.to, &req.text).await {
-                                    Ok(resp) => {
-                                        let next_ctx = extract_context_token_from_send_response(&resp);
-                                        if let Ok(mut cache) = state.token_cache.try_lock() {
-                                            let entry = cache
-                                                .entry(req.to.clone())
-                                                .or_insert_with(|| PeerTokenState::new(active_token.clone()));
-                                            entry.mark_success(next_ctx);
-                                            tracing::debug!(
-                                                peer_id = %req.to,
-                                                observed_age_secs = entry.observed_age_secs(),
-                                                send_count = entry.send_count,
-                                                stale = entry.stale,
-                                                attempt = attempt + 1,
-                                                "wechat peer token send succeeded"
-                                            );
-                                        }
-                                        return (
-                                            StatusCode::OK,
-                                            Json(SendResponse { ok: true, error: None }),
+                            // Aligned with the upstream reference bot
+                            // (corespeed-io/wechatbot): send once using the cached
+                            // context_token. The sendmessage path no longer treats
+                            // ret=-2 as an expired-token error, so we never block
+                            // waiting for an inbound message. Only a transport error or
+                            // errcode=-14 (session expired) surfaces as a failure, which
+                            // the caller's outbox/DLQ retries normally.
+                            match send_text_via_ilink(&client, &send_cfg, &req.to, &req.text).await {
+                                Ok(resp) => {
+                                    let next_ctx = extract_context_token_from_send_response(&resp);
+                                    let response_context_token =
+                                        next_ctx.clone().unwrap_or_else(|| ctx.clone());
+                                    let (observed_age_secs, send_count, stale, token_to_persist) = {
+                                        let mut cache = state.token_cache.lock().await;
+                                        let entry = cache
+                                            .entry(req.to.clone())
+                                            .or_insert_with(|| PeerTokenState::new(ctx.clone()));
+                                        entry.mark_success(next_ctx);
+                                        (
+                                            entry.observed_age_secs(),
+                                            entry.send_count,
+                                            entry.stale,
+                                            entry.token.clone(),
+                                        )
+                                    };
+                                    let _persist_guard = state.context_token_persist_lock.lock().await;
+                                    if let Err(e) = persist_context_token(&req.to, &token_to_persist) {
+                                        tracing::warn!(peer_id = %req.to, error = %e, "failed to persist context token after send");
+                                    }
+                                    {
+                                        tracing::debug!(
+                                            peer_id = %req.to,
+                                            observed_age_secs = observed_age_secs,
+                                            send_count = send_count,
+                                            stale = stale,
+                                            "wechat peer token send succeeded"
                                         );
                                     }
-                                    Err(e) => {
-                                        last_err = Some(e.clone());
-                                        if !is_context_expired_error(&e) {
-                                            return (
-                                                StatusCode::BAD_GATEWAY,
-                                                Json(SendResponse { ok: false, error: Some(e) }),
-                                            );
-                                        }
-
+                                    return (
+                                        StatusCode::OK,
+                                        Json(SendResponse {
+                                            ok: true,
+                                            context_token: Some(response_context_token),
+                                            error: None,
+                                        }),
+                                    );
+                                }
+                                Err(e) => {
+                                    if e.contains("ret=-2") {
                                         {
                                             let mut cache = state.token_cache.lock().await;
                                             if let Some(entry) = cache.get_mut(&req.to) {
-                                                entry.mark_stale();
-                                                tracing::warn!(
-                                                    peer_id = %req.to,
-                                                    observed_age_secs = entry.observed_age_secs(),
-                                                    send_count = entry.send_count,
-                                                    attempt = attempt + 1,
-                                                    "wechat peer token marked stale after ret=-2"
-                                                );
+                                                entry.stale = true;
                                             }
                                         }
-
-                                        if attempt + 1 >= MAX_CONTEXT_RETRY_ATTEMPTS {
-                                            break;
-                                        }
-
-                                        let delay_ms = CONTEXT_RETRY_DELAYS_MS
-                                            .get(attempt)
-                                            .copied()
-                                            .unwrap_or(*CONTEXT_RETRY_DELAYS_MS.last().unwrap_or(&3_000));
-                                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-
-                                        if let Some(refreshed) = fetch_context_token_for_peer(&state, &client, &req.to).await {
-                                            active_token = refreshed.token.clone();
-                                            state.logger.log_token_refresh(&req.to, 0, "send");
-                                            state.audit_sink.record(None, "token_refresh", &format!(
-                                                "source=send,peer_id={},trigger=ret_minus_2",
-                                                &req.to
-                                            ));
-                                            tracing::info!(
-                                                peer_id = %req.to,
-                                                attempt = attempt + 1,
-                                                delay_ms = delay_ms,
-                                                "wechat peer token refreshed for retry"
-                                            );
-                                        } else {
-                                            tracing::warn!(
-                                                peer_id = %req.to,
-                                                attempt = attempt + 1,
-                                                delay_ms = delay_ms,
-                                                "wechat peer token not refreshed before retry"
-                                            );
-                                        }
+                                        tracing::warn!(
+                                            peer_id = %req.to,
+                                            error = %e,
+                                            "wechat send failed: context window needs refresh"
+                                        );
+                                        return (
+                                            StatusCode::PRECONDITION_FAILED,
+                                            Json(SendResponse {
+                                                ok: false,
+                                                context_token: None,
+                                                error: Some(
+                                                    "no valid context window for peer; please send one inbound message to bot and retry"
+                                                        .to_string(),
+                                                ),
+                                            }),
+                                        );
                                     }
+                                    tracing::warn!(
+                                        peer_id = %req.to,
+                                        error = %e,
+                                        "wechat send failed"
+                                    );
+                                    return (
+                                        StatusCode::BAD_GATEWAY,
+                                        Json(SendResponse {
+                                            ok: false,
+                                            context_token: None,
+                                            error: Some(e),
+                                        }),
+                                    );
                                 }
                             }
-
-                            return (
-                                StatusCode::BAD_GATEWAY,
-                                Json(SendResponse {
-                                    ok: false,
-                                    error: Some(last_err.unwrap_or_else(|| {
-                                        "wechat send failed after context retry window".to_string()
-                                    })),
-                                }),
-                            );
                         }
 
                         (
                             StatusCode::PRECONDITION_FAILED,
                             Json(SendResponse {
                                 ok: false,
+                                context_token: None,
                                 error: Some(
                                     "no valid context_token for peer; wait for inbound user message then retry"
                                         .to_string(),
