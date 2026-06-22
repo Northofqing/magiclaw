@@ -71,7 +71,20 @@ fn resolve_wechat_data_dir() -> PathBuf {
     }
 
     let home = env::var("HOME").unwrap_or_default();
-    Path::new(&home).join(".claude").join("channels").join("wechat")
+    let legacy_dir = Path::new(&home).join(".claude").join("channels").join("wechat");
+    if legacy_dir.exists() {
+        return legacy_dir;
+    }
+
+    let db_path = env::var("MAGICLAW_DB_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| AppConfig::default().db_path);
+    Path::new(&db_path)
+        .parent()
+        .map(|parent| parent.join("wechat"))
+        .unwrap_or(legacy_dir)
 }
 
 fn persist_context_token(peer_id: &str, token: &str) -> Result<(), String> {
@@ -879,30 +892,6 @@ impl AppRuntime {
                                     );
                                 }
                                 Err(e) => {
-                                    if e.contains("ret=-2") {
-                                        {
-                                            let mut cache = state.token_cache.lock().await;
-                                            if let Some(entry) = cache.get_mut(&req.to) {
-                                                entry.stale = true;
-                                            }
-                                        }
-                                        tracing::warn!(
-                                            peer_id = %req.to,
-                                            error = %e,
-                                            "wechat send failed: context window needs refresh"
-                                        );
-                                        return (
-                                            StatusCode::PRECONDITION_FAILED,
-                                            Json(SendResponse {
-                                                ok: false,
-                                                context_token: None,
-                                                error: Some(
-                                                    "no valid context window for peer; please send one inbound message to bot and retry"
-                                                        .to_string(),
-                                                ),
-                                            }),
-                                        );
-                                    }
                                     tracing::warn!(
                                         peer_id = %req.to,
                                         error = %e,

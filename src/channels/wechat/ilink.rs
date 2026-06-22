@@ -48,10 +48,7 @@ impl ILinkSendConfig {
         if !cfg.enabled {
             return None;
         }
-        if cfg.base_url.trim().is_empty()
-            || cfg.token.trim().is_empty()
-            || cfg.context_token.trim().is_empty()
-        {
+        if cfg.base_url.trim().is_empty() || cfg.token.trim().is_empty() {
             return None;
         }
 
@@ -124,6 +121,10 @@ pub struct ILinkQrcodeStatusResponse {
     pub bot_token: Option<String>,
     #[serde(default)]
     pub baseurl: Option<String>,
+    #[serde(default)]
+    pub ilink_bot_id: Option<String>,
+    #[serde(default)]
+    pub ilink_user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,12 +301,13 @@ pub async fn send_text_via_ilink(
     let value: serde_json::Value =
         serde_json::from_str(trimmed).map_err(|e| format!("invalid ilink JSON response: {}", e))?;
 
-    // We need strict delivery semantics for monitor usage: any non-zero business field
-    // (`ret` or `errcode`) is treated as a send failure to avoid false-positive success logs.
-    // This favors correctness/observability over optimistic acceptance.
+    // Aligned with the upstream reference bot (corespeed-io/wechatbot): the
+    // sendmessage path only treats a non-zero `errcode` as a real failure
+    // (notably errcode=-14 "session expired"). `ret=-2` is observed on
+    // proactive sends but is not a reliable delivery-failure signal here.
     let ret = value.get("ret").and_then(|v| v.as_i64()).unwrap_or_default();
     let errcode = value.get("errcode").and_then(|v| v.as_i64()).unwrap_or_default();
-    if ret != 0 || errcode != 0 {
+    if errcode != 0 {
         let errmsg = value
             .get("errmsg")
             .and_then(|v| v.as_str())
@@ -443,6 +445,8 @@ pub async fn get_qrcode_status(
     base_url: &str,
     qrcode: &str,
 ) -> Result<ILinkQrcodeStatusResponse, String> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
     let base = if base_url.ends_with('/') {
         base_url.to_string()
     } else {
@@ -450,8 +454,15 @@ pub async fn get_qrcode_status(
     };
     let url = format!("{}ilink/bot/get_qrcode_status?qrcode={}", base, qrcode);
 
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("ilink-app-clientversion"),
+        HeaderValue::from_static("1"),
+    );
+
     let response = client
         .get(url)
+        .headers(headers)
         .send()
         .await
         .map_err(|e| format!("ilink get_qrcode_status request failed: {}", e))?;
@@ -733,9 +744,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_text_fails_on_ret_minus_2() {
-        // Strict semantics: non-zero `ret` must surface as a failure to avoid
-        // false-positive "send success" in callers.
+    async fn send_text_accepts_ret_minus_2_as_success() {
+        // Aligned with upstream corespeed-io/wechatbot: `ret=-2` without a
+        // non-zero `errcode` must not be treated as a hard send failure.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -765,10 +776,10 @@ mod tests {
             keepalive_timeout_ms: 2_000,
         };
 
-        let err = send_text_via_ilink(&client, &cfg, "peer_a", "hello")
+        let response = send_text_via_ilink(&client, &cfg, "peer_a", "hello")
             .await
-            .unwrap_err();
-        assert!(err.contains("ret=-2"), "unexpected error: {err}");
+            .expect("ret=-2 must be treated as a successful send");
+        assert_eq!(response["ret"], -2);
 
         handle.abort();
     }

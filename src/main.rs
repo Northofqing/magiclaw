@@ -23,6 +23,7 @@ enum CliCommand {
     Mcp,
     Send(SendCommand),
     Auth(AuthCommand),
+    WeChat(WechatCommand),
     BindImport(ImportCommand),
     PushImport(ImportCommand),
     PushRun(String),
@@ -35,6 +36,17 @@ enum AuthCommand {
     Issue(AuthIssueCommand),
     List(AuthListCommand),
     Revoke(AuthRevokeCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WechatCommand {
+    Login(WechatLoginCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WechatLoginCommand {
+    data_dir: Option<String>,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +87,7 @@ enum ImportFormat {
     Csv,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ProjectWechatAccount {
     token: String,
     #[serde(rename = "baseUrl")]
@@ -84,10 +96,12 @@ struct ProjectWechatAccount {
     account_id: String,
     #[serde(rename = "userId", default)]
     user_id: Option<String>,
+    #[serde(rename = "savedAt", skip_serializing_if = "Option::is_none")]
+    saved_at: Option<String>,
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nEnvironment:\n  MAGICLAW_DB_PATH     SQLite database path shared by daemon and auth commands\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)\n  MAGICLAW_API_TOKEN    Optional bearer token for localhost daemon /api/send and /api/window_status"
+    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw wechat login [--data-dir <dir>] [--account-id <id>]\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nEnvironment:\n  MAGICLAW_DB_PATH     SQLite database path shared by daemon and auth commands\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)\n  MAGICLAW_API_TOKEN    Optional bearer token for localhost daemon /api/send and /api/window_status"
 }
 fn resolve_db_path() -> String {
     env::var("MAGICLAW_DB_PATH")
@@ -103,10 +117,17 @@ fn default_wechat_data_dir() -> PathBuf {
     }
 
     if let Ok(home) = env::var("HOME") {
-        return Path::new(&home).join(".claude").join("channels").join("wechat");
+        let legacy_dir = Path::new(&home).join(".claude").join("channels").join("wechat");
+        if legacy_dir.exists() {
+            return legacy_dir;
+        }
     }
 
-    PathBuf::from(".claude/channels/wechat")
+    let db_path = resolve_db_path();
+    Path::new(&db_path)
+        .parent()
+        .map(|parent| parent.join("wechat"))
+        .unwrap_or_else(|| PathBuf::from(".claude/channels/wechat"))
 }
 
 fn resolve_wechat_data_dir(path: Option<&str>) -> PathBuf {
@@ -184,6 +205,10 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
 
     if args[1] == "binding" {
         return parse_binding_args(&args[2..]);
+    }
+
+    if args[1] == "wechat" {
+        return parse_wechat_args(&args[2..]).map(CliCommand::WeChat);
     }
 
     if args[1] != "send" {
@@ -381,6 +406,38 @@ fn parse_auth_args(args: &[String]) -> Result<AuthCommand, String> {
     }
 }
 
+fn parse_wechat_args(args: &[String]) -> Result<WechatCommand, String> {
+    match args.first().map(String::as_str) {
+        Some("login") => {
+            let mut data_dir = None::<String>;
+            let mut account_id = None::<String>;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--data-dir" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --data-dir\n{}", usage()))?;
+                        data_dir = Some(value.clone());
+                    }
+                    "--account-id" => {
+                        index += 1;
+                        let value = args.get(index).ok_or_else(|| format!("missing value for --account-id\n{}", usage()))?;
+                        account_id = Some(value.clone());
+                    }
+                    "--help" | "-h" => return Err("usage: magiclaw wechat login [--data-dir <dir>] [--account-id <id>]".into()),
+                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
+                }
+                index += 1;
+            }
+            Ok(WechatCommand::Login(WechatLoginCommand {
+                data_dir,
+                account_id,
+            }))
+        }
+        _ => Err(format!("usage: magiclaw wechat (login)\n{}", usage())),
+    }
+}
+
 /// Open the SQLite pool used by the binding/push CLI, creating the parent dir.
 fn open_db_pool() -> Result<magiclaw::infrastructure::db::DbPool, Box<dyn std::error::Error>> {
     let db_path = resolve_db_path();
@@ -518,6 +575,168 @@ fn run_auth_revoke(cmd: &AuthRevokeCommand) -> Result<(), Box<dyn std::error::Er
     let registry = open_api_client_registry()?;
     let revoked = registry.revoke_token(&cmd.token)?;
     println!("revoked={}", revoked);
+    Ok(())
+}
+
+fn open_qr_popup(qrcode_path: &Path) -> Option<std::process::Child> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    let path = qrcode_path.to_str()?;
+    std::process::Command::new("qlmanage")
+        .args(["-p", path])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+}
+
+fn close_qr_popup(child: &mut Option<std::process::Child>) {
+    if let Some(process) = child.as_mut() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    *child = None;
+}
+
+async fn run_wechat_login(cmd: &WechatLoginCommand) -> Result<(), Box<dyn std::error::Error>> {
+    use magiclaw::channels::wechat::ilink::{get_bot_qrcode, get_qrcode_status};
+    use qrcode::QrCode;
+    
+    let data_dir = if let Some(dir) = &cmd.data_dir {
+        PathBuf::from(dir)
+    } else {
+        default_wechat_data_dir()
+    };
+    
+    fs::create_dir_all(&data_dir)?;
+    
+    // WeChat iLink base URL
+    let base_url = "https://ilinkai.weixin.qq.com";
+    
+    let client = reqwest::Client::new();
+    
+    // Step 1: Get QR code
+    println!("正在获取二维码...");
+    let qrcode_resp = get_bot_qrcode(&client, base_url).await?;
+
+    let scan_value = qrcode_resp
+        .qrcode_img_content
+        .clone()
+        .unwrap_or_else(|| qrcode_resp.qrcode.clone());
+    
+    // Generate QR code image and save
+    let qr_code = QrCode::new(scan_value.clone())?;
+    let image = qr_code.render::<image::Rgb<u8>>()
+        .min_dimensions(200, 200)
+        .build();
+    
+    let qrcode_path = data_dir.join("qrcode.png");
+    image.save(&qrcode_path)?;
+    println!("✓ 二维码已生成: {}", qrcode_path.display());
+
+    let mut qr_popup = open_qr_popup(&qrcode_path);
+    if qr_popup.is_some() {
+        println!("✓ 已弹出二维码窗口，请在微信中扫描");
+    }
+    
+    println!("\n========== 请用微信扫描以下二维码登录 ==========");
+    println!("二维码 ID: {}", qrcode_resp.qrcode);
+    println!("扫码链接: {}", scan_value);
+    println!("图片位置: {}", qrcode_path.display());
+    println!("============================================\n");
+    
+    println!("等待二维码扫描...");
+    
+    // Step 2: Poll for QR code status
+    let max_wait_secs = 300; // 5 minutes timeout
+    let poll_interval_secs = 2;
+    let mut elapsed_secs = 0;
+    
+    let (token, base, api_account_id, api_user_id) = loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(poll_interval_secs)).await;
+        elapsed_secs += poll_interval_secs;
+        
+        match get_qrcode_status(&client, base_url, &qrcode_resp.qrcode).await {
+            Ok(status_resp) => {
+                let status = status_resp.status.unwrap_or_else(|| "wait".to_string());
+                match status.as_str() {
+                    "wait" | "waiting" => {
+                        print!(".");
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                    }
+                    "scaned" | "scanned" => {
+                        println!("\n👀 已扫码，请在微信中确认...");
+                    }
+                    "expired" => {
+                        close_qr_popup(&mut qr_popup);
+                        return Err("二维码已过期，请重新运行登录命令".into());
+                    }
+                    "confirmed" => {
+                        let token = status_resp
+                            .bot_token
+                            .clone()
+                            .ok_or("登录确认但未返回 bot_token")?;
+                        let base = status_resp
+                            .baseurl
+                            .clone()
+                            .unwrap_or_else(|| base_url.to_string());
+                        let account_id = status_resp.ilink_bot_id.clone();
+                        let user_id = status_resp.ilink_user_id.clone();
+                        println!("\n✓ 二维码扫描成功！");
+                        close_qr_popup(&mut qr_popup);
+                        break (token, base, account_id, user_id);
+                    }
+                    other => {
+                        println!("\n状态: {}", other);
+                    }
+                }
+            }
+            Err(e) => {
+                // Status check might fail temporarily; just continue polling
+                tracing::debug!(error = %e, "qrcode status check error");
+            }
+        }
+        
+        if elapsed_secs >= max_wait_secs {
+            close_qr_popup(&mut qr_popup);
+            return Err(format!("二维码等待超时 ({}秒)", max_wait_secs).into());
+        }
+    };
+    
+    println!("\n");
+    
+    // Step 3: Extract and save to account.json
+    let account_id = if let Some(id) = &cmd.account_id {
+        id.clone()
+    } else if let Some(id) = api_account_id {
+        id
+    } else {
+        "unknown_account_id".to_string()
+    };
+    
+    let account = ProjectWechatAccount {
+        token: token.clone(),
+        base_url: base.clone(),
+        account_id: account_id.clone(),
+        user_id: api_user_id,
+        saved_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    
+    let account_json_path = data_dir.join("account.json");
+    let content = serde_json::to_string_pretty(&account)?;
+    fs::write(&account_json_path, format!("{}\n", content))?;
+    
+    println!("✓ 登录成功！");
+    println!("账户信息已保存到: {}", account_json_path.display());
+    println!("  token: {}...", &token[..std::cmp::min(20, token.len())]);
+    println!("  baseUrl: {}", base);
+    println!("  accountId: {}", account_id);
+    
+    println!("\n现在可以运行以下命令启动 daemon:");
+    println!("  scripts/daemon-up.sh");
+    
     Ok(())
 }
 
@@ -931,6 +1150,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AuthCommand::Issue(cmd) => run_auth_issue(&cmd)?,
             AuthCommand::List(cmd) => run_auth_list(&cmd)?,
             AuthCommand::Revoke(cmd) => run_auth_revoke(&cmd)?,
+        },
+        Ok(CliCommand::WeChat(cmd)) => match cmd {
+            WechatCommand::Login(cmd) => run_wechat_login(&cmd).await?,
         },
         Ok(CliCommand::BindImport(cmd)) => {
             run_bind_import(&cmd)?;
