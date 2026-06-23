@@ -144,6 +144,10 @@ pub struct ILinkGetUpdatesResponse {
 #[derive(Debug, Clone)]
 pub enum ILinkGetUpdatesError {
     Transport(String),
+    SessionExpired {
+        errcode: i32,
+        errmsg: String,
+    },
     Business {
         ret: i32,
         errcode: i32,
@@ -155,6 +159,13 @@ impl std::fmt::Display for ILinkGetUpdatesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Transport(msg) => write!(f, "{}", msg),
+            Self::SessionExpired { errcode, errmsg } => {
+                write!(
+                    f,
+                    "ilink session expired: errcode={}, errmsg={}",
+                    errcode, errmsg
+                )
+            }
             Self::Business {
                 ret,
                 errcode,
@@ -301,12 +312,22 @@ pub async fn send_text_via_ilink(
     let value: serde_json::Value =
         serde_json::from_str(trimmed).map_err(|e| format!("invalid ilink JSON response: {}", e))?;
 
+    // Check for session expired (-14) FIRST before generic errcode check
+    let errcode = value.get("errcode").and_then(|v| v.as_i64()).unwrap_or_default() as i32;
+    if errcode == -14 {
+        let errmsg = value
+            .get("errmsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("session expired")
+            .to_string();
+        return Err(format!("wechat session expired (errcode -14): {}", errmsg));
+    }
+
     // Aligned with the upstream reference bot (corespeed-io/wechatbot): the
     // sendmessage path only treats a non-zero `errcode` as a real failure
     // (notably errcode=-14 "session expired"). `ret=-2` is observed on
     // proactive sends but is not a reliable delivery-failure signal here.
     let ret = value.get("ret").and_then(|v| v.as_i64()).unwrap_or_default();
-    let errcode = value.get("errcode").and_then(|v| v.as_i64()).unwrap_or_default();
     if errcode != 0 {
         let errmsg = value
             .get("errmsg")
@@ -385,6 +406,14 @@ pub async fn get_updates_via_ilink(
 
     let value: ILinkGetUpdatesResponse = serde_json::from_str(trimmed)
         .map_err(|e| ILinkGetUpdatesError::Transport(format!("invalid ilink getupdates JSON response: {}", e)))?;
+
+    // Check for session expired (-14) FIRST
+    if let Some(errcode) = value.errcode {
+        if errcode == -14 {
+            let errmsg = value.errmsg.clone().unwrap_or_else(|| "session expired".into());
+            return Err(ILinkGetUpdatesError::SessionExpired { errcode, errmsg });
+        }
+    }
 
     if value.ret != 0 {
         let errcode = value.errcode.unwrap_or_default();
