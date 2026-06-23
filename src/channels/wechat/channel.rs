@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::channels::channel_trait::{Channel, HealthStatus, SendReceipt};
 use crate::domain::entities::message::{Message, MessageContent};
+use crate::domain::ports::context_token_store::ContextTokenStore;
 use crate::domain::ports::media::{MediaRef, MediaUploader};
 use crate::domain::ports::sync_buf_store::SyncBufStore;
 use crate::domain::value_objects::route_key::ChannelId;
@@ -42,6 +43,7 @@ enum WeChatMode {
         client: reqwest::Client,
         session: std::sync::Arc<tokio::sync::Mutex<SessionState>>,
         sync_store: Option<std::sync::Arc<dyn SyncBufStore>>,
+        token_store: Option<std::sync::Arc<dyn ContextTokenStore>>,
         account_id: String,
     },
 }
@@ -88,12 +90,13 @@ impl WeChatChannel {
     }
 
     pub fn from_config(cfg: WeChatConfig) -> Self {
-        Self::from_config_with_store(cfg, None)
+        Self::from_config_with_store(cfg, None, None)
     }
 
     pub fn from_config_with_store(
         cfg: WeChatConfig,
         sync_store: Option<std::sync::Arc<dyn SyncBufStore>>,
+        token_store: Option<std::sync::Arc<dyn ContextTokenStore>>,
     ) -> Self {
         if let Some(ilink_cfg) = ILinkSendConfig::from_wechat_config(&cfg) {
             let sync_buf = sync_store
@@ -112,6 +115,7 @@ impl WeChatChannel {
                         sync_buf,
                     })),
                     sync_store,
+                    token_store,
                     account_id: cfg.account_id,
                 },
                 media_uploader: None,
@@ -193,6 +197,7 @@ impl Channel for WeChatChannel {
                 client,
                 session,
                 sync_store,
+                token_store,
                 account_id,
             } => {
                 tracing::info!(account_id = %account_id, "WeChat channel started (ilink enabled)");
@@ -203,6 +208,7 @@ impl Channel for WeChatChannel {
                 let poll_inbound_tx = inbound_tx.clone();
                 let poll_account_id = account_id.clone();
                 let poll_sync_store = sync_store.clone();
+                let poll_token_store = token_store.clone();
                 let poll_channel_id = channel_id.clone();
 
                 tokio::spawn(async move {
@@ -210,6 +216,16 @@ impl Channel for WeChatChannel {
                         let state = poll_session.lock().await;
                         state.sync_buf.clone()
                     };
+
+                    // Load persisted tokens from database at startup for crash recovery
+                    if let Some(store) = &poll_token_store {
+                        if let Ok(persisted_tokens) = store.get_all(&poll_account_id) {
+                            let state = poll_session.lock().await;
+                            for (user_id, token) in persisted_tokens {
+                                state.set_context_token(user_id, token).await;
+                            }
+                        }
+                    }
 
                     loop {
                         let updates = match get_updates_via_ilink(&poll_client, &poll_cfg, &sync_buf).await {
@@ -225,6 +241,10 @@ impl Channel for WeChatChannel {
                                 let state = poll_session.lock().await;
                                 state.clear_context_tokens().await;
                                 drop(state);
+                                // Also clear persisted tokens from database
+                                if let Some(store) = &poll_token_store {
+                                    let _ = store.delete_all(&poll_account_id);
+                                }
                                 // Wait before retrying (session may recover or user needs to re-login)
                                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                                 continue;
@@ -309,7 +329,12 @@ impl Channel for WeChatChannel {
                             if let Some(user_id) = token_user_id {
                                 if let Some(ctx) = extract_latest_context_token(std::slice::from_ref(&msg), Some(&user_id)) {
                                     let state = poll_session.lock().await;
-                                    state.set_context_token(user_id, ctx).await;
+                                    state.set_context_token(user_id.clone(), ctx.clone()).await;
+                                    drop(state);
+                                    // Also persist token to database for crash recovery
+                                    if let Some(store) = &poll_token_store {
+                                        let _ = store.set(&poll_account_id, &user_id, &ctx);
+                                    }
                                 }
                             }
 
@@ -353,6 +378,7 @@ impl Channel for WeChatChannel {
                 client,
                 session,
                 sync_store: _,
+                token_store: _,
                 account_id: _,
             } => {
                 // context_token is granted by the ilink server only when the user sends a

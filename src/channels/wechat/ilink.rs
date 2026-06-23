@@ -320,7 +320,7 @@ pub async fn send_text_via_ilink(
             .and_then(|v| v.as_str())
             .unwrap_or("session expired")
             .to_string();
-        return Err(format!("wechat session expired (errcode -14): {}", errmsg));
+        return Err(format!("wechat session expired (errcode=-14): {}", errmsg));
     }
 
     // Aligned with the upstream reference bot (corespeed-io/wechatbot): the

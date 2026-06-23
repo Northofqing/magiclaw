@@ -358,6 +358,7 @@ impl AppRuntime {
         registry.register(Arc::new(WeChatChannel::from_config_with_store(
             config.wechat.clone(),
             Some(sync_buf_store.clone()),
+            None,
         )));
         registry.register(Arc::new(DingtalkChannel::new()));
         registry.register(Arc::new(FeishuChannel::from_config(config.feishu.clone())));

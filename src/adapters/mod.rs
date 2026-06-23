@@ -4,6 +4,7 @@ pub mod http_auth;
 pub mod mcp;
 pub mod moka_dedup;
 pub mod sqlite_audit;
+pub mod sqlite_context_tokens;
 pub mod sqlite_conversation_state;
 pub mod sqlite_dead_letter;
 pub mod sqlite_inbox;

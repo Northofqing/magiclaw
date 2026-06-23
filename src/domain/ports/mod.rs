@@ -1,6 +1,7 @@
 pub mod audit_sink;
 pub mod conversation_queue;
 pub mod conversation_state_repo;
+pub mod context_token_store;
 pub mod dead_letter_repo;
 pub mod dedup_cache;
 pub mod inbox_repo;
