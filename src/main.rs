@@ -1,17 +1,18 @@
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
 use magiclaw::adapters::api_client_registry::ApiClientRegistry;
 use magiclaw::adapters::mcp::server::McpServer;
+use magiclaw::adapters::sqlite_context_tokens::SqliteContextTokenStore;
 use magiclaw::channels::wechat::ilink::{send_text_via_ilink, ILinkSendConfig};
 use magiclaw::infrastructure::config::AppConfig;
 use magiclaw::infrastructure::runtime::AppRuntime;
 use magiclaw::infrastructure::tracing_init;
+use magiclaw::domain::ports::context_token_store::ContextTokenStore;
 use serde::{Deserialize, Serialize};
 
 /// Default HTTP API address for the magiclaw daemon (matches weclaw convention).
@@ -67,10 +68,29 @@ struct AuthRevokeCommand {
     token: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendChannel {
+    Wechat,
+    Feishu,
+}
+
+impl SendChannel {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "wechat" | "weixin" | "wx" => Ok(SendChannel::Wechat),
+            "feishu" | "lark" => Ok(SendChannel::Feishu),
+            other => Err(format!("unknown channel: '{}' (expected: wechat | feishu)", other)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SendCommand {
+    channel: SendChannel,
     data_dir: String,
     to: Option<String>,
+    context_token: Option<String>,
+    receive_id_type: Option<String>,
     message: String,
 }
 
@@ -101,7 +121,7 @@ struct ProjectWechatAccount {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--to <recipient>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw wechat login [--data-dir <dir>] [--account-id <id>]\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nEnvironment:\n  MAGICLAW_DB_PATH     SQLite database path shared by daemon and auth commands\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)\n  MAGICLAW_API_TOKEN    Optional bearer token for localhost daemon /api/send and /api/window_status"
+    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--channel <wechat|feishu>] [--to <recipient>] [--receive-id-type <type>] [--context-token <token>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw wechat login [--data-dir <dir>] [--account-id <id>]\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nChannels:\n  --channel wechat (default)  Send via WeChat (ilink). Recipient inferred from context tokens if omitted.\n  --channel feishu            Send via Feishu OpenAPI. --to is required (open_id/chat_id/...).\n                              receive_id_type auto-detected from prefix (oc_->chat_id, ou_->open_id) or via --receive-id-type.\n\nEnvironment:\n  MAGICLAW_DB_PATH      SQLite database path shared by daemon and auth commands\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)\n  MAGICLAW_API_TOKEN    Optional bearer token for localhost daemon /api/send and /api/window_status\n  MAGICLAW_API_SEND_DEBUG  Set to 1/true to include diagnostics in /api/send responses\n  FEISHU_*              Feishu channel config (APP_ID, APP_SECRET, RECEIVE_ID_TYPE, ...)"
 }
 fn resolve_db_path() -> String {
     env::var("MAGICLAW_DB_PATH")
@@ -151,25 +171,8 @@ fn load_project_wechat_account(data_dir: &Path) -> Result<ProjectWechatAccount, 
     Ok(account)
 }
 
-fn load_project_context_tokens(data_dir: &Path) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
-    let ctx_path = data_dir.join("context_tokens.json");
-    if !ctx_path.exists() {
-        return Ok(HashMap::new());
-    }
-
-    let content = fs::read_to_string(&ctx_path)?;
-    let tokens: HashMap<String, String> = serde_json::from_str(&content)?;
-    Ok(tokens)
-}
-
-fn save_project_context_tokens(
-    data_dir: &Path,
-    tokens: &std::collections::HashMap<String, String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let ctx_path = data_dir.join("context_tokens.json");
-    let content = serde_json::to_string_pretty(tokens)?;
-    fs::write(&ctx_path, format!("{}\n", content))?;
-    Ok(())
+fn open_context_token_store() -> Result<SqliteContextTokenStore, Box<dyn std::error::Error>> {
+    Ok(SqliteContextTokenStore::open(resolve_db_path())?)
 }
 
 fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
@@ -217,11 +220,24 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
 
     let mut data_dir = None::<String>;
     let mut to: Option<String> = None;
+    let mut context_token: Option<String> = None;
     let mut message: Option<String> = None;
+    let mut channel: Option<SendChannel> = None;
+    let mut receive_id_type: Option<String> = None;
 
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
+            "--channel" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| format!("missing value for --channel\n{}", usage()))?;
+                channel = Some(SendChannel::parse(value).map_err(|e| format!("{}\n{}", e, usage()))?);
+            }
+            "--receive-id-type" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| format!("missing value for --receive-id-type\n{}", usage()))?;
+                receive_id_type = Some(value.clone());
+            }
             "--data-dir" => {
                 index += 1;
                 let value = args.get(index).ok_or_else(|| format!("missing value for --data-dir\n{}", usage()))?;
@@ -237,6 +253,11 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
                 let value = args.get(index).ok_or_else(|| format!("missing value for --message\n{}", usage()))?;
                 message = Some(value.clone());
             }
+            "--context-token" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| format!("missing value for --context-token\n{}", usage()))?;
+                context_token = Some(value.clone());
+            }
             "--help" | "-h" => {
                 return Err(usage().to_string());
             }
@@ -250,8 +271,11 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
     let message = message.ok_or_else(|| format!("missing required flag: --message\n{}", usage()))?;
 
     Ok(CliCommand::Send(SendCommand {
+        channel: channel.unwrap_or(SendChannel::Wechat),
         data_dir: data_dir.unwrap_or_default(),
         to,
+        context_token,
+        receive_id_type,
         message,
     }))
 }
@@ -740,14 +764,55 @@ async fn run_wechat_login(cmd: &WechatLoginCommand) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+fn validate_feishu_config(cfg: &magiclaw::infrastructure::config::FeishuConfig) -> Result<(), String> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    
+    // Validate receive_id_type is a known value
+    let valid_receive_id_types = ["open_id", "user_id", "chat_id", "union_id", "email"];
+    if !valid_receive_id_types.contains(&cfg.receive_id_type.as_str()) {
+        return Err(format!(
+            "invalid feishu receive_id_type: '{}' (must be one of: {})",
+            cfg.receive_id_type,
+            valid_receive_id_types.join(", ")
+        ));
+    }
+    
+    // Verify token exchange can be attempted (either pre-issued or via app credentials)
+    let has_preissued_token = !cfg.tenant_access_token.trim().is_empty();
+    let has_app_credentials = !cfg.app_id.trim().is_empty() || !cfg.app_secret.trim().is_empty();
+    
+    if !has_preissued_token && !has_app_credentials {
+        return Err(
+            "feishu enabled but no authentication: set either FEISHU_TENANT_ACCESS_TOKEN or both APP_ID + APP_SECRET"
+                .into(),
+        );
+    }
+    
+    // If using app credentials, both must be present
+    if has_app_credentials && (cfg.app_id.trim().is_empty() || cfg.app_secret.trim().is_empty()) {
+        return Err(
+            "feishu: if using app-based token exchange, both FEISHU_APP_ID and FEISHU_APP_SECRET must be set"
+                .into(),
+        );
+    }
+    
+    Ok(())
+}
+
 fn load_runtime_config() -> AppConfig {
     let mut config = AppConfig::default();
     config.db_path = resolve_db_path();
     let data_dir = resolve_wechat_data_dir(None);
+    let token_store = open_context_token_store().ok();
 
     match load_project_wechat_account(&data_dir) {
         Ok(account) => {
-            let context_tokens = load_project_context_tokens(&data_dir).unwrap_or_default();
+            let context_tokens = token_store
+                .as_ref()
+                .and_then(|store| store.get_all(&account.account_id).ok())
+                .unwrap_or_default();
             let context_token = account
                 .user_id
                 .as_ref()
@@ -778,51 +843,51 @@ fn load_runtime_config() -> AppConfig {
     }
 
     // Feishu runtime config from env (optional).
-    if let Ok(enabled) = env::var("MAGICLAW_FEISHU_ENABLED") {
+    if let Ok(enabled) = env::var("FEISHU_ENABLED") {
         let v = enabled.trim().to_ascii_lowercase();
         config.feishu.enabled = matches!(v.as_str(), "1" | "true" | "yes" | "on");
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_ACCOUNT_ID") {
+    if let Ok(v) = env::var("FEISHU_ACCOUNT_ID") {
         if !v.trim().is_empty() {
             config.feishu.account_id = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_BASE_URL") {
+    if let Ok(v) = env::var("FEISHU_BASE_URL") {
         if !v.trim().is_empty() {
             config.feishu.base_url = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_APP_ID") {
+    if let Ok(v) = env::var("FEISHU_APP_ID") {
         if !v.trim().is_empty() {
             config.feishu.app_id = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_APP_SECRET") {
+    if let Ok(v) = env::var("FEISHU_APP_SECRET") {
         if !v.trim().is_empty() {
             config.feishu.app_secret = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_TENANT_ACCESS_TOKEN") {
+    if let Ok(v) = env::var("FEISHU_TENANT_ACCESS_TOKEN") {
         if !v.trim().is_empty() {
             config.feishu.tenant_access_token = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_RECEIVE_ID_TYPE") {
+    if let Ok(v) = env::var("FEISHU_RECEIVE_ID_TYPE") {
         if !v.trim().is_empty() {
             config.feishu.receive_id_type = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_VERIFICATION_TOKEN") {
+    if let Ok(v) = env::var("FEISHU_VERIFICATION_TOKEN") {
         if !v.trim().is_empty() {
             config.feishu.verification_token = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_SIGNING_SECRET") {
+    if let Ok(v) = env::var("FEISHU_SIGNING_SECRET") {
         if !v.trim().is_empty() {
             config.feishu.signing_secret = v.trim().to_string();
         }
     }
-    if let Ok(v) = env::var("MAGICLAW_FEISHU_ACCOUNTS_JSON") {
+    if let Ok(v) = env::var("FEISHU_ACCOUNTS_JSON") {
         if !v.trim().is_empty() {
             match serde_json::from_str::<Vec<magiclaw::infrastructure::config::FeishuConfig>>(v.trim()) {
                 Ok(accounts) => {
@@ -830,10 +895,36 @@ fn load_runtime_config() -> AppConfig {
                     tracing::info!(count = config.feishu_accounts.len(), "loaded feishu multi-account config from env");
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "invalid MAGICLAW_FEISHU_ACCOUNTS_JSON; ignored");
+                    tracing::warn!(error = %e, "invalid FEISHU_ACCOUNTS_JSON; ignored");
                 }
             }
         }
+    }
+    
+    // Validate Feishu configuration at startup (MUST)
+    if let Err(e) = validate_feishu_config(&config.feishu) {
+        tracing::error!(error = %e, "feishu config validation failed");
+        panic!("feishu config validation failed: {}", e);
+    }
+    for (idx, cfg) in config.feishu_accounts.iter().enumerate() {
+        if let Err(e) = validate_feishu_config(cfg) {
+            tracing::error!(account_index = idx, error = %e, "feishu multi-account config validation failed");
+            panic!("feishu multi-account[{}] config validation failed: {}", idx, e);
+        }
+    }
+    
+    // Log Feishu configuration status
+    if config.feishu.enabled {
+        tracing::info!(
+            account_id = %config.feishu.account_id,
+            base_url = %config.feishu.base_url,
+            receive_id_type = %config.feishu.receive_id_type,
+            has_app_id = !config.feishu.app_id.is_empty(),
+            has_preissued_token = !config.feishu.tenant_access_token.is_empty(),
+            has_verification_token = !config.feishu.verification_token.is_empty(),
+            has_signing_secret = !config.feishu.signing_secret.is_empty(),
+            "feishu configuration loaded and validated"
+        );
     }
 
     // AI backend selection (Phase 4): MAGICLAW_AI_BACKEND overrides the config.
@@ -992,9 +1083,115 @@ async fn try_daemon_api_send(
 }
 
 async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd.channel {
+        SendChannel::Wechat => run_send_wechat(cmd).await,
+        SendChannel::Feishu => run_send_feishu(cmd).await,
+    }
+}
+
+/// Build a Feishu config from environment variables for the CLI send path.
+fn load_feishu_config_from_env() -> magiclaw::infrastructure::config::FeishuConfig {
+    let mut cfg = magiclaw::infrastructure::config::FeishuConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    if let Ok(v) = env::var("FEISHU_ACCOUNT_ID") {
+        if !v.trim().is_empty() {
+            cfg.account_id = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("FEISHU_BASE_URL") {
+        if !v.trim().is_empty() {
+            cfg.base_url = v.trim().to_string();
+        }
+    }
+    if let Ok(v) = env::var("FEISHU_APP_ID") {
+        cfg.app_id = v.trim().to_string();
+    }
+    if let Ok(v) = env::var("FEISHU_APP_SECRET") {
+        cfg.app_secret = v.trim().to_string();
+    }
+    if let Ok(v) = env::var("FEISHU_TENANT_ACCESS_TOKEN") {
+        cfg.tenant_access_token = v.trim().to_string();
+    }
+    if let Ok(v) = env::var("FEISHU_RECEIVE_ID_TYPE") {
+        if !v.trim().is_empty() {
+            cfg.receive_id_type = v.trim().to_string();
+        }
+    }
+    cfg
+}
+
+/// Auto-detect Feishu receive_id_type from a recipient ID prefix.
+/// Falls back to None when the prefix is unrecognized.
+fn detect_feishu_receive_id_type(recipient: &str) -> Option<&'static str> {
+    let r = recipient.trim();
+    if r.starts_with("oc_") {
+        Some("chat_id")
+    } else if r.starts_with("ou_") {
+        Some("open_id")
+    } else if r.starts_with("on_") {
+        Some("union_id")
+    } else if r.contains('@') {
+        Some("email")
+    } else {
+        None
+    }
+}
+
+async fn run_send_feishu(cmd: &SendCommand) -> Result<(), Box<dyn std::error::Error>> {
+    use magiclaw::channels::channel_trait::Channel;
+    use magiclaw::channels::feishu::channel::FeishuChannel;
+    use magiclaw::domain::entities::message::MessageContent;
+
+    let recipient = cmd
+        .to
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or("飞书发送必须指定 --to（open_id / chat_id / user_id / union_id / email）")?;
+
+    let mut cfg = load_feishu_config_from_env();
+
+    // Resolve receive_id_type with priority: explicit flag > auto-detect > env/default.
+    if let Some(rt) = cmd.receive_id_type.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        cfg.receive_id_type = rt.to_string();
+    } else if let Some(detected) = detect_feishu_receive_id_type(recipient) {
+        cfg.receive_id_type = detected.to_string();
+    }
+
+    if let Err(e) = validate_feishu_config(&cfg) {
+        return Err(format!("飞书配置无效: {}", e).into());
+    }
+
+    tracing::info!(
+        recipient = %recipient,
+        receive_id_type = %cfg.receive_id_type,
+        account_id = %cfg.account_id,
+        "sending feishu message"
+    );
+
+    let channel = FeishuChannel::from_config(cfg);
+    let content = MessageContent::Text(cmd.message.clone());
+
+    let receipt = channel
+        .send_message(recipient, &content)
+        .await
+        .map_err(|e| format!("feishu send failed: {}", e))?;
+
+    println!(
+        "send ok (feishu): message_id={}, platform_msg_id={}",
+        receipt.message_id,
+        receipt.platform_msg_id.as_deref().unwrap_or("<none>")
+    );
+    Ok(())
+}
+
+async fn run_send_wechat(cmd: &SendCommand) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = resolve_wechat_data_dir((!cmd.data_dir.is_empty()).then_some(cmd.data_dir.as_str()));
     let account = load_project_wechat_account(&data_dir)?;
-    let mut context_tokens = load_project_context_tokens(&data_dir)?;
+    let token_store = open_context_token_store()?;
+    let mut context_tokens = token_store.get_all(&account.account_id)?;
 
     let recipient = if let Some(to) = cmd.to.as_ref() {
         if to.trim().is_empty() {
@@ -1007,15 +1204,23 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
             .next()
             .cloned()
             .or(account.user_id.clone())
-            .ok_or("无法从 context_tokens.json 或 account.json 推断收件人，请先在微信里给 ClawBot 发一条消息后重试")?
+            .ok_or("无法从 context token store 或 account.json 推断收件人，请先在微信里给 ClawBot 发一条消息后重试")?
     };
 
     tracing::info!(bot_id = %account.account_id, recipient = %recipient, "sending wechat message");
 
-    let context_token = context_tokens
-        .get(&recipient)
-        .cloned()
-        .or_else(|| context_tokens.values().next().cloned())
+    let context_token = cmd
+        .context_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .or_else(|| {
+            context_tokens
+                .get(&recipient)
+                .cloned()
+                .or_else(|| context_tokens.values().next().cloned())
+        })
         .unwrap_or_default();
 
     // Strategy:
@@ -1039,7 +1244,10 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
         Ok((result, daemon_context_token)) => {
             if let Some(token) = daemon_context_token.as_deref().map(str::trim).filter(|token| !token.is_empty()) {
                 context_tokens.insert(recipient.clone(), token.to_string());
-                let _ = save_project_context_tokens(&data_dir, &context_tokens);
+                let _ = token_store.set(&account.account_id, &recipient, token);
+            } else if let Some(explicit_token) = cmd.context_token.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                context_tokens.insert(recipient.clone(), explicit_token.to_string());
+                let _ = token_store.set(&account.account_id, &recipient, explicit_token);
             }
             println!("send ok (via daemon): {}", result);
             return Ok(());
@@ -1084,7 +1292,7 @@ async fn run_send_command(cmd: &SendCommand) -> Result<(), Box<dyn std::error::E
         .filter(|token| !token.is_empty())
     {
         context_tokens.insert(recipient.clone(), token.to_string());
-        let _ = save_project_context_tokens(&data_dir, &context_tokens);
+        let _ = token_store.set(&account.account_id, &recipient, token);
     }
 
     let receipt = magiclaw::channels::channel_trait::SendReceipt {
@@ -1198,11 +1406,84 @@ mod tests {
         assert_eq!(
             parsed,
             CliCommand::Send(SendCommand {
+                channel: SendChannel::Wechat,
                 data_dir: "/tmp/wechat".into(),
                 to: None,
+                context_token: None,
+                receive_id_type: None,
                 message: "hello".into(),
             })
         );
+    }
+
+    #[test]
+    fn parse_send_command_feishu_channel() {
+        let args = vec![
+            "magiclaw".into(),
+            "send".into(),
+            "--channel".into(),
+            "feishu".into(),
+            "--to".into(),
+            "oc_abc123".into(),
+            "--message".into(),
+            "hello feishu".into(),
+        ];
+
+        let parsed = parse_cli_args(&args).unwrap();
+        assert_eq!(
+            parsed,
+            CliCommand::Send(SendCommand {
+                channel: SendChannel::Feishu,
+                data_dir: String::new(),
+                to: Some("oc_abc123".into()),
+                context_token: None,
+                receive_id_type: None,
+                message: "hello feishu".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_send_command_feishu_with_receive_id_type() {
+        let args = vec![
+            "magiclaw".into(),
+            "send".into(),
+            "--channel".into(),
+            "lark".into(),
+            "--to".into(),
+            "ou_xyz".into(),
+            "--receive-id-type".into(),
+            "open_id".into(),
+            "--message".into(),
+            "hi".into(),
+        ];
+
+        match parse_cli_args(&args).unwrap() {
+            CliCommand::Send(cmd) => {
+                assert_eq!(cmd.channel, SendChannel::Feishu);
+                assert_eq!(cmd.to.as_deref(), Some("ou_xyz"));
+                assert_eq!(cmd.receive_id_type.as_deref(), Some("open_id"));
+            }
+            other => panic!("unexpected parse result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn send_channel_parse_aliases() {
+        assert_eq!(SendChannel::parse("wechat").unwrap(), SendChannel::Wechat);
+        assert_eq!(SendChannel::parse("wx").unwrap(), SendChannel::Wechat);
+        assert_eq!(SendChannel::parse("feishu").unwrap(), SendChannel::Feishu);
+        assert_eq!(SendChannel::parse("lark").unwrap(), SendChannel::Feishu);
+        assert!(SendChannel::parse("telegram").is_err());
+    }
+
+    #[test]
+    fn detect_feishu_receive_id_type_by_prefix() {
+        assert_eq!(detect_feishu_receive_id_type("oc_abc"), Some("chat_id"));
+        assert_eq!(detect_feishu_receive_id_type("ou_abc"), Some("open_id"));
+        assert_eq!(detect_feishu_receive_id_type("on_abc"), Some("union_id"));
+        assert_eq!(detect_feishu_receive_id_type("user@example.com"), Some("email"));
+        assert_eq!(detect_feishu_receive_id_type("unknown123"), None);
     }
 
     #[test]

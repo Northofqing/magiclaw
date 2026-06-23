@@ -2,5 +2,7 @@
 /.claude
 /.vscode
 /data
+/tmp
+tmp-daemon.log
 .env
 .env.local

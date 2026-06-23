@@ -323,10 +323,9 @@ pub async fn send_text_via_ilink(
         return Err(format!("wechat session expired (errcode=-14): {}", errmsg));
     }
 
-    // Aligned with the upstream reference bot (corespeed-io/wechatbot): the
-    // sendmessage path only treats a non-zero `errcode` as a real failure
-    // (notably errcode=-14 "session expired"). `ret=-2` is observed on
-    // proactive sends but is not a reliable delivery-failure signal here.
+    // Delivery acceptance must be strict enough to avoid false positives.
+    // We treat non-zero errcode as failure, and also reject non-zero ret when
+    // the response doesn't contain a server_id ack.
     let ret = value.get("ret").and_then(|v| v.as_i64()).unwrap_or_default();
     if errcode != 0 {
         let errmsg = value
@@ -334,6 +333,29 @@ pub async fn send_text_via_ilink(
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
         return Err(format!("ilink business error: ret={}, errcode={}, errmsg={}", ret, errcode, errmsg));
+    }
+
+    let has_server_id = value
+        .get("msg")
+        .and_then(|v| v.get("server_id"))
+        .and_then(|v| v.as_str())
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+        || value
+            .get("server_id")
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+
+    if ret != 0 && !has_server_id {
+        let errmsg = value
+            .get("errmsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!(
+            "ilink send rejected: ret={}, errcode={}, errmsg={}",
+            ret, errcode, errmsg
+        ));
     }
 
     Ok(value)
@@ -773,9 +795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_text_accepts_ret_minus_2_as_success() {
-        // Aligned with upstream corespeed-io/wechatbot: `ret=-2` without a
-        // non-zero `errcode` must not be treated as a hard send failure.
+    async fn send_text_rejects_ret_minus_2_without_server_id() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -805,10 +825,10 @@ mod tests {
             keepalive_timeout_ms: 2_000,
         };
 
-        let response = send_text_via_ilink(&client, &cfg, "peer_a", "hello")
+        let err = send_text_via_ilink(&client, &cfg, "peer_a", "hello")
             .await
-            .expect("ret=-2 must be treated as a successful send");
-        assert_eq!(response["ret"], -2);
+            .unwrap_err();
+        assert!(err.contains("ret=-2"), "unexpected error: {err}");
 
         handle.abort();
     }

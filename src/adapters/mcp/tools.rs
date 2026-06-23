@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,7 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::adapters::sqlite_context_tokens::SqliteContextTokenStore;
 use crate::application::send_message;
+use crate::domain::ports::context_token_store::ContextTokenStore;
 use crate::domain::ports::outbox_repo::OutboxRepo;
 use crate::domain::value_objects::route_key::ConversationType;
 
@@ -121,16 +122,15 @@ fn load_project_wechat_account(data_dir: &Path) -> Result<ProjectWechatAccount, 
         .map_err(|e| format!("failed to parse {}: {}", account_path.display(), e))
 }
 
-fn load_project_context_tokens(data_dir: &Path) -> Result<BTreeMap<String, String>, String> {
-    let ctx_path = data_dir.join("context_tokens.json");
-    if !ctx_path.exists() {
-        return Ok(BTreeMap::new());
-    }
-
-    let content = fs::read_to_string(&ctx_path)
-        .map_err(|e| format!("failed to read {}: {}", ctx_path.display(), e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse {}: {}", ctx_path.display(), e))
+fn open_context_token_store() -> Result<SqliteContextTokenStore, String> {
+    SqliteContextTokenStore::open(
+        env::var("MAGICLAW_DB_PATH")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| crate::infrastructure::config::AppConfig::default().db_path),
+    )
+    .map_err(|e| format!("failed to open context token store: {}", e))
 }
 
 fn is_supported_channel(channel: &str) -> bool {
@@ -201,7 +201,9 @@ impl ToolDispatcher {
 
         let data_dir = resolve_wechat_data_dir();
         let account = load_project_wechat_account(&data_dir)?;
-        let context_tokens = load_project_context_tokens(&data_dir)?;
+        let context_tokens = open_context_token_store()?
+            .get_all(&account.account_id)
+            .map_err(|e| format!("failed to load context tokens: {}", e))?;
 
         let mut peers: Vec<Value> = context_tokens
             .keys()
@@ -246,7 +248,9 @@ impl ToolDispatcher {
             return Err(format!("account mismatch: requested {}, configured {}", args.account, account.account_id));
         }
 
-        let context_tokens = load_project_context_tokens(&data_dir)?;
+        let context_tokens = open_context_token_store()?
+            .get_all(&account.account_id)
+            .map_err(|e| format!("failed to load context tokens: {}", e))?;
         let has_context_token = context_tokens
             .values()
             .any(|token| !token.trim().is_empty());
@@ -265,6 +269,8 @@ impl ToolDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite_context_tokens::SqliteContextTokenStore;
+    use crate::domain::ports::context_token_store::ContextTokenStore;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::sync::Arc;
     use crate::adapters::sqlite_outbox::SqliteOutboxRepo;
@@ -338,11 +344,10 @@ mod tests {
             r#"{"token":"secret","baseUrl":"https://example.invalid","accountId":"test_account","userId":"test_user"}"#,
         )
         .unwrap();
-        fs::write(
-            dir.join("context_tokens.json"),
-            r#"{"peer_a":"ctx-a","peer_b":"ctx-b"}"#,
-        )
-        .unwrap();
+        let db_path = dir.join("magiclaw.db");
+        let store = SqliteContextTokenStore::open(&db_path).unwrap();
+        store.set("test_account", "peer_a", "ctx-a").unwrap();
+        store.set("test_account", "peer_b", "ctx-b").unwrap();
         dir
     }
 
@@ -354,6 +359,10 @@ mod tests {
         fn new(path: PathBuf) -> Self {
             let lock = env_lock().lock().unwrap();
             env::set_var("WECHAT_CHANNEL_DIR", path);
+            if let Ok(dir) = env::var("WECHAT_CHANNEL_DIR") {
+                let db_path = Path::new(&dir).join("magiclaw.db");
+                env::set_var("MAGICLAW_DB_PATH", db_path);
+            }
             Self { _lock: lock }
         }
     }
@@ -361,6 +370,7 @@ mod tests {
     impl Drop for TestDirGuard {
         fn drop(&mut self) {
             env::remove_var("WECHAT_CHANNEL_DIR");
+            env::remove_var("MAGICLAW_DB_PATH");
         }
     }
 }
