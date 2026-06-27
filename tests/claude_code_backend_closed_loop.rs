@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use magiclaw::adapters::conversation_store::ConversationStore;
 use magiclaw::adapters::sqlite_audit::SqliteAuditSink;
+use magiclaw::adapters::sqlite_audit_query::SqliteAuditQuery;
 use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
 use magiclaw::application::audit::query_audit_logs;
 use magiclaw::core::ai::backend::AiBackend;
@@ -135,7 +136,8 @@ async fn claude_code_backend_reply_reaches_outbox_with_audit() {
 
     // Red line 2.6: the AI decision is audit-logged.
     let rk = serde_json::to_string(&key).unwrap();
-    let records = query_audit_logs(&pool, Some(&rk), 10).unwrap();
+    let q = SqliteAuditQuery::new(pool.clone());
+    let records = query_audit_logs(&q, Some(&rk), 10).unwrap();
     assert!(
         records.iter().any(|r| r.action == "ai_generate" && r.result.contains("claude_code")),
         "expected an ai_generate audit record for claude_code, got: {records:?}"

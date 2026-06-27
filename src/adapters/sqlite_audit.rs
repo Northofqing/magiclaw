@@ -52,7 +52,8 @@ mod tests {
         sink.record(Some("wechat/conv1"), "send", "sent");
         sink.record(Some("wechat/conv1"), "dead_letter", "max retries");
 
-        let records = query_audit_logs(&db, Some("wechat/conv1"), 10).unwrap();
+        let q = crate::adapters::sqlite_audit_query::SqliteAuditQuery::new(db);
+        let records = query_audit_logs(&q, Some("wechat/conv1"), 10).unwrap();
         assert_eq!(records.len(), 2);
         assert!(records.iter().any(|r| r.action == "send" && r.result == "sent"));
         assert!(records.iter().any(|r| r.action == "dead_letter"));

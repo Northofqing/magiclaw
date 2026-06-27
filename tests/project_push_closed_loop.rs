@@ -4,6 +4,7 @@
 
 use magiclaw::application::binding::{import_bindings_csv, import_bindings_jsonl, list_bindings};
 use magiclaw::application::push::{import_pushes, parse_pushes_csv, parse_pushes_jsonl, run_push_job};
+use magiclaw::adapters::sqlite_audit_query::SqliteAuditQuery;
 use magiclaw::application::audit::query_audit_logs;
 use magiclaw::infrastructure::db::{init_db, DbPool};
 
@@ -55,7 +56,8 @@ fn jsonl_import_to_broadcast_push_reaches_outbox_with_audit() {
     assert_eq!(pending, 2);
 
     // 5. Audit recorded the push decision.
-    let audits = query_audit_logs(&db, Some("proj_a"), 10).unwrap();
+    let q = SqliteAuditQuery::new(db.clone());
+    let audits = query_audit_logs(&q, Some("proj_a"), 10).unwrap();
     assert!(audits.iter().any(|a| a.action == "project_push"));
 
     let _ = std::fs::remove_file(&bind_path);

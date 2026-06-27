@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::ports::audit_query::AuditQuery;
+use crate::domain::ports::audit_sink::AuditSink;
 use crate::infrastructure::db::DbPool;
 
 /// An audit log entry for querying.
@@ -12,43 +14,41 @@ pub struct AuditRecord {
     pub created_at: i64,
 }
 
-/// Audit tooling: query audit logs for a given route or action.
-pub fn query_audit_logs(db: &DbPool, route_key: Option<&str>, limit: usize) -> Result<Vec<AuditRecord>, String> {
-    let rk = route_key.map(|s| s.to_string());
-    let limit = limit as i64;
-    db.query(move |conn| {
-        let mut stmt = if rk.is_some() {
-            conn.prepare(
-                "SELECT id, route_key, action, result, created_at FROM audit_log WHERE route_key = ?1 ORDER BY created_at DESC LIMIT ?2"
-            )?
-        } else {
-            conn.prepare(
-                "SELECT id, route_key, action, result, created_at FROM audit_log ORDER BY created_at DESC LIMIT ?1"
-            )?
-        };
-
-        let records: Result<Vec<_>, _> = if let Some(ref key) = rk {
-            stmt.query_map(rusqlite::params![key, limit], |row| {
-                Ok(AuditRecord {
-                    id: row.get(0)?, route_key: row.get(1)?, action: row.get(2)?,
-                    result: row.get(3)?, created_at: row.get(4)?,
-                })
-            })?.collect()
-        } else {
-            stmt.query_map(rusqlite::params![limit], |row| {
-                Ok(AuditRecord {
-                    id: row.get(0)?, route_key: row.get(1)?, action: row.get(2)?,
-                    result: row.get(3)?, created_at: row.get(4)?,
-                })
-            })?.collect()
-        };
-
-        records
-    }).map_err(|e| format!("audit query error: {}", e))
+/// Audit query via the `AuditQuery` port — preferred entry point for the
+/// application layer (no DbPool, no rusqlite).
+///
+/// `route_key = None` returns recent records across all routes.
+pub fn query_audit_logs(
+    store: &dyn AuditQuery,
+    route_key: Option<&str>,
+    limit: usize,
+) -> Result<Vec<AuditRecord>, String> {
+    match route_key {
+        Some(k) => store.query_by_route(k, limit),
+        None => store.query_all(limit),
+    }
 }
 
-/// Write an audit log entry for a high-risk operation.
-pub fn write_audit(db: &DbPool, route_key: Option<&str>, action: &str, result: &str) -> Result<(), String> {
+/// Audit write via the `AuditSink` port — preferred entry point for the
+/// application layer (no DbPool, no rusqlite).
+pub fn write_audit_via_sink(
+    sink: &dyn AuditSink,
+    route_key: Option<&str>,
+    action: &str,
+    result: &str,
+) {
+    sink.record(route_key, action, result);
+}
+
+/// Audit write via raw DbPool — kept for callers not yet wired up to the
+/// `AuditSink` port. New code should prefer `write_audit_via_sink`.
+#[deprecated(note = "use write_audit_via_sink with an AuditSink port")]
+pub fn write_audit(
+    db: &DbPool,
+    route_key: Option<&str>,
+    action: &str,
+    result: &str,
+) -> Result<(), String> {
     let rk = route_key.map(|s| s.to_string());
     let action = action.to_string();
     let result = result.to_string();
@@ -64,27 +64,34 @@ pub fn write_audit(db: &DbPool, route_key: Option<&str>, action: &str, result: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite_audit::SqliteAuditSink;
+    use crate::adapters::sqlite_audit_query::SqliteAuditQuery;
     use crate::infrastructure::db::init_db;
 
-    fn make_pool() -> DbPool {
-        DbPool::new(init_db(":memory:").unwrap())
+    fn make_pool() -> crate::infrastructure::db::DbPool {
+        crate::infrastructure::db::DbPool::new(init_db(":memory:").unwrap())
     }
 
     #[test]
-    fn write_and_query_audit() {
-        let db = make_pool();
-        write_audit(&db, Some("wechat/conv1"), "auto_allowlist", "added").unwrap();
-        write_audit(&db, Some("wechat/conv1"), "send", "success").unwrap();
+    fn write_and_query_audit_via_ports() {
+        let pool = make_pool();
+        let sink = SqliteAuditSink::new(pool.clone());
+        write_audit_via_sink(&sink, Some("wechat/conv1"), "auto_allowlist", "added");
+        write_audit_via_sink(&sink, Some("wechat/conv1"), "send", "success");
 
-        let records = query_audit_logs(&db, Some("wechat/conv1"), 10).unwrap();
+        let q = SqliteAuditQuery::new(pool);
+        let records = query_audit_logs(&q, Some("wechat/conv1"), 10).unwrap();
         assert_eq!(records.len(), 2);
     }
 
     #[test]
-    fn query_all_audit() {
-        let db = make_pool();
-        write_audit(&db, None, "startup", "ok").unwrap();
-        let records = query_audit_logs(&db, None, 10).unwrap();
+    fn query_all_audit_via_ports() {
+        let pool = make_pool();
+        let sink = SqliteAuditSink::new(pool.clone());
+        write_audit_via_sink(&sink, None, "startup", "ok");
+
+        let q = SqliteAuditQuery::new(pool);
+        let records = query_audit_logs(&q, None, 10).unwrap();
         assert!(!records.is_empty());
     }
 }

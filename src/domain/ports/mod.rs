@@ -1,3 +1,4 @@
+pub mod audit_query;
 pub mod audit_sink;
 pub mod conversation_queue;
 pub mod conversation_state_repo;

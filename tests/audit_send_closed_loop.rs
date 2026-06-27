@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 use magiclaw::adapters::sqlite_audit::SqliteAuditSink;
 use magiclaw::adapters::sqlite_dead_letter::SqliteDeadLetterRepo;
+use magiclaw::adapters::sqlite_audit_query::SqliteAuditQuery;
 use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
 use magiclaw::application::audit::query_audit_logs;
 use magiclaw::application::outbox_worker::{self, OutboxMessageSender};
@@ -51,7 +52,7 @@ async fn successful_send_writes_sent_audit() {
     let retry = RetryConfig::default();
     outbox_worker::process_pending(&outbox, &dlq, &retry, &AlwaysOk, &audit, 16).await;
 
-    let logs = query_audit_logs(&db, Some("wechat/conv-ok"), 16).unwrap();
+    let q = SqliteAuditQuery::new(db.clone()); let logs = query_audit_logs(&q, Some("wechat/conv-ok"), 16).unwrap();
     assert_eq!(logs.len(), 1, "expected one audit row");
     assert_eq!(logs[0].action, "send");
     assert_eq!(logs[0].result, "sent");
@@ -74,7 +75,7 @@ async fn exhausted_retry_writes_dead_letter_audit() {
     };
     outbox_worker::process_pending(&outbox, &dlq, &retry, &AlwaysFail, &audit, 16).await;
 
-    let logs = query_audit_logs(&db, Some("wechat/conv-fail"), 16).unwrap();
+    let q = SqliteAuditQuery::new(db.clone()); let logs = query_audit_logs(&q, Some("wechat/conv-fail"), 16).unwrap();
     assert_eq!(logs.len(), 1, "expected one audit row");
     assert_eq!(logs[0].action, "dead_letter");
     assert!(logs[0].result.contains("channel unavailable"));
