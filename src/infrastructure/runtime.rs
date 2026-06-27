@@ -64,6 +64,7 @@ use crate::domain::value_objects::route_key::RouteKey;
 use crate::infrastructure::config::{AppConfig, FeishuConfig};
 use crate::infrastructure::db::{self, DbPool};
 use crate::infrastructure::daily_logger::DailyLogger;
+use crate::infrastructure::task_supervisor::{TaskState, TaskSupervisor};
 
 fn persist_context_token(
     store: &dyn ContextTokenStore,
@@ -104,6 +105,10 @@ pub struct AppRuntime {
     audit_sink: Arc<SqliteAuditSink>,
     conversation_state_repo: Arc<SqliteConversationStateRepo>,
     send_gate: Arc<ResilienceGate>,
+    /// Supervised background tasks (GC janitor, inbound router, outbox worker,
+    /// wechat token poller, HTTP API). Panics are observable instead of
+    /// silently dropped. See `task_supervisor.rs` for the design.
+    pub task_supervisor: Arc<TaskSupervisor>,
 }
 
 fn extract_feishu_verification_token(payload: &serde_json::Value) -> Option<String> {
@@ -345,6 +350,7 @@ impl AppRuntime {
             audit_sink,
             conversation_state_repo,
             send_gate,
+            task_supervisor: Arc::new(TaskSupervisor::new()),
         })
     }
 
@@ -366,7 +372,7 @@ impl AppRuntime {
         let gc_store = self.conversation_store.clone();
         let gc_timeout = self.config.idle_timeout_secs;
         let gc_interval = self.config.gc_scan_interval_secs;
-        tokio::spawn(async move {
+        self.task_supervisor.spawn("gc_janitor", async move {
             gc_janitor::gc_janitor(gc_store.as_ref(), gc_timeout, gc_interval).await;
         });
 
@@ -374,7 +380,7 @@ impl AppRuntime {
         let inbox = self.inbox_repo.clone();
         let dedup = self.dedup_cache.clone();
         let queue = self.conversation_store.clone();
-        tokio::spawn(async move {
+        self.task_supervisor.spawn("inbound_router", async move {
             while let Some(msg) = inbound_rx.recv().await {
                 match inbox_processor::process_inbound(inbox.as_ref(), &msg) {
                     Ok(inbox_processor::InboxResult::Duplicate) => {
@@ -402,7 +408,7 @@ impl AppRuntime {
         let registry = self.channel_registry.clone();
         let audit = self.audit_sink.clone();
         let send_gate = self.send_gate.clone();
-        tokio::spawn(async move {
+        self.task_supervisor.spawn("outbox_worker", async move {
             let retry = RetryConfig::default();
             let inner = Arc::new(RegistryOutboxSender::new(registry)) as Arc<dyn OutboxMessageSender>;
             let sender = ResilientOutboxSender::new(inner, send_gate);
@@ -539,6 +545,7 @@ impl AppRuntime {
             conversation_store: Arc<ConversationStore>,
             logger: Arc<DailyLogger>,
             audit_sink: Arc<SqliteAuditSink>,
+            task_supervisor: Arc<TaskSupervisor>,
         }
 
         #[derive(Clone, Deserialize)]
@@ -682,6 +689,7 @@ impl AppRuntime {
             conversation_store: self.conversation_store.clone(),
             logger,
             audit_sink: self.audit_sink.clone(),
+            task_supervisor: self.task_supervisor.clone(),
         });
 
         // Start a background long-poll loop to keep context_token hot in memory.
@@ -689,7 +697,7 @@ impl AppRuntime {
         // so /api/send can avoid token-expiry gaps during continuous sending.
         if state.wechat.enabled && !state.wechat.token.trim().is_empty() {
             let poll_state = state.clone();
-            tokio::spawn(async move {
+            self.task_supervisor.spawn("wechat_token_poller", async move {
                 const INITIAL_RETRY_DELAY_MS: u64 = 2_000;
                 const MAX_RETRY_DELAY_MS: u64 = 30_000;
                 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
@@ -1174,12 +1182,30 @@ impl AppRuntime {
                             "account_count": enabled_count
                         });
                     }
-                    
+
+                    // Task 9: include background task status from the supervisor
+                    // so operators can detect panics in GC/outbox/HTTP/etc.
+                    let finished = state.task_supervisor.poll_status();
+                    let running = state.task_supervisor.running_names();
+                    let tasks = serde_json::json!({
+                        "running": running,
+                        "finished_count": finished.len(),
+                        "finished": finished.iter().map(|t| serde_json::json!({
+                            "name": t.name,
+                            "state": match t.state {
+                                TaskState::Running => "running",
+                                TaskState::Completed => "completed",
+                                TaskState::Failed(_) => "failed",
+                            }
+                        })).collect::<Vec<_>>()
+                    });
+
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
                             "ok": true,
-                            "feishu": feishu_detail
+                            "feishu": feishu_detail,
+                            "tasks": tasks
                         }))
                     )
                 }),
@@ -1389,7 +1415,7 @@ impl AppRuntime {
             .parse()
             .map_err(|e| format!("invalid HTTP API address '{}': {}", addr, e))?;
 
-        tokio::spawn(async move {
+        self.task_supervisor.spawn("http_api", async move {
             let listener = match tokio::net::TcpListener::bind(addr).await {
                 Ok(l) => l,
                 Err(e) => {
