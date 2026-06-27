@@ -102,13 +102,21 @@ pub struct AppRuntime {
     api_client_registry: Arc<ApiClientRegistry>,
     dedup_cache: Arc<MokaDedupCache>,
     sync_buf_store: Arc<SqliteSyncBufStore>,
-    audit_sink: Arc<SqliteAuditSink>,
+    pub audit_sink: Arc<SqliteAuditSink>,
     conversation_state_repo: Arc<SqliteConversationStateRepo>,
     send_gate: Arc<ResilienceGate>,
+    db_pool: DbPool,
     /// Supervised background tasks (GC janitor, inbound router, outbox worker,
     /// wechat token poller, HTTP API). Panics are observable instead of
     /// silently dropped. See `task_supervisor.rs` for the design.
     pub task_supervisor: Arc<TaskSupervisor>,
+}
+
+impl AppRuntime {
+    /// Access the shared DbPool (for verification and CLI tooling).
+    pub fn db_pool(&self) -> DbPool {
+        self.db_pool.clone()
+    }
 }
 
 fn extract_feishu_verification_token(payload: &serde_json::Value) -> Option<String> {
@@ -350,12 +358,30 @@ impl AppRuntime {
             audit_sink,
             conversation_state_repo,
             send_gate,
+            db_pool: db_pool.clone(),
             task_supervisor: Arc::new(TaskSupervisor::new()),
         })
     }
 
     pub async fn start_background(&self) -> Result<(), String> {
         crash_recovery::recover_after_crash(self.outbox_repo.as_ref())?;
+
+        // Red line #5.3: verify audit log hash chain on startup.
+        match crate::adapters::sqlite_audit::verify_chain(&self.db_pool) {
+            Ok(Some(head)) => {
+                tracing::info!(
+                    head_hash = %head,
+                    "audit log chain verified"
+                );
+            }
+            Ok(None) => {
+                tracing::info!("audit log chain verified (empty)");
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, "audit log chain integrity check FAILED — refusing to start");
+                return Err(format!("audit log chain integrity check failed: {:?}", e));
+            }
+        }
 
         match self.conversation_state_repo.load_all() {
             Ok(states) => {

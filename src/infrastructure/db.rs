@@ -89,7 +89,14 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, rusqlite::Error> {
              route_key TEXT,
              action TEXT NOT NULL,
              result TEXT NOT NULL,
-             created_at INTEGER NOT NULL DEFAULT (unixepoch())
+             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+             -- Red line #5.3: chain hash for tamper detection.
+             -- prev_hash is the previous entry's entry_hash (NULL only for the
+             -- genesis entry); entry_hash is sha256(prev_hash || route_key ||
+             -- action || result || created_at). Verification at startup walks
+             -- the chain and aborts on any mismatch.
+             prev_hash TEXT,
+             entry_hash TEXT
          );
 
          CREATE TABLE IF NOT EXISTS api_clients (
@@ -197,6 +204,19 @@ pub fn init_db(path: impl AsRef<Path>) -> Result<Connection, rusqlite::Error> {
              ON user_agent_preferences (channel, account_scope, peer_id);
          CREATE INDEX IF NOT EXISTS idx_api_clients_project ON api_clients (project_id, revoked_at, expires_at);",
     )?;
+
+    // Schema migrations for existing DBs (idempotent: errors are tolerated if
+    // the column already exists). Adding hash chain columns to audit_log
+    // (CLAUDE.md red line #5.3) requires backfilling prev_hash/entry_hash for
+    // pre-existing rows or accepting that the chain starts from "now".
+    let _ = conn.execute(
+        "ALTER TABLE audit_log ADD COLUMN prev_hash TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE audit_log ADD COLUMN entry_hash TEXT",
+        [],
+    );
 
     Ok(conn)
 }
