@@ -43,6 +43,7 @@ impl OutboxMessageSender for RegistrySender {
 }
 
 #[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
 async fn feishu_media_failure_goes_retry_then_dlq_and_can_replay() {
     let db_path = std::env::temp_dir().join(format!("magiclaw_feishu_dlq_{}.db", uuid::Uuid::new_v4()));
 

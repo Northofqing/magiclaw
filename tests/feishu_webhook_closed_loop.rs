@@ -30,6 +30,7 @@ fn sign(ts: &str, nonce: &str, secret: &str, body: &str) -> String {
 }
 
 #[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
 async fn feishu_webhook_ingress_persists_and_routes_to_outbox() {
     let port = free_port();
     let db_path = std::env::temp_dir().join(format!("magiclaw_feishu_{}.db", uuid::Uuid::new_v4()));

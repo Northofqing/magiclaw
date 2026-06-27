@@ -52,9 +52,16 @@ fn test_feishu_webhook_signature_verification_wrong_secret() {
     let correct_result = verify_webhook_signature_helper("v0.test", correct_secret);
     let wrong_result = verify_webhook_signature_helper("v0.test", wrong_secret);
     
-    // Results will differ based on the secret used
-    // This test validates that secret matters for verification
-    assert_ne!(correct_result, wrong_result || true, "different secrets should affect verification");
+    // The helper validates signature format (prefix "v0", hex suffix).
+    // "test" is not valid hex, so both fail format validation.
+    assert!(!correct_result, "non-hex signature should fail format validation");
+    assert!(!wrong_result, "non-hex signature should fail format validation");
+
+    // With valid hex signatures, the helper accepts the format.
+    // (Full HMAC verification uses FeishuChannel's verify_webhook_signature.)
+    let valid_hex = "v0.0000000000000000000000000000000000000000000000000000000000000000";
+    let hex_result = verify_webhook_signature_helper(valid_hex, "any_secret");
+    assert!(hex_result, "valid hex signature format should pass helper validation");
 }
 
 #[test]
@@ -84,7 +91,7 @@ fn test_feishu_webhook_duplicate_event_dedup_idempotency() {
     assert!(result_1.is_ok(), "first entry persistence should succeed");
     
     // Attempt to persist duplicate entry with same ID
-    let result_2 = inbox_repo.insert(&entry_1);
+    let _result_2 = inbox_repo.insert(&entry_1);
     // SQLite's INSERT OR IGNORE will skip duplicates, not error
     // This is expected behavior - dedup at persistence layer
     let exists = inbox_repo.exists(&entry_1.id);
@@ -212,5 +219,5 @@ fn verify_webhook_signature_helper(signature: &str, _signing_secret: &str) -> bo
     
     // Validate hex format of signature (simple check)
     let hex_part = parts[1];
-    hex_part.len() > 0 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
+    !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit())
 }

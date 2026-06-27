@@ -11,7 +11,7 @@ use magiclaw::core::pipeline::agent_command_middleware::AgentCommandMiddleware;
 use magiclaw::core::pipeline::agent_command::AgentCommandParser;
 use magiclaw::core::pipeline::middleware::{Middleware, PipelineContext};
 use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
-use magiclaw::domain::aggregates::conversation::Conversation;
+use magiclaw::domain::value_objects::ConversationSnapshot;
 use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
 use magiclaw::infrastructure::config::{AppConfig, default_agent_aliases};
 use magiclaw::infrastructure::db::{self, DbPool};
@@ -48,7 +48,7 @@ async fn test_user_agent_preference_closed_loop() {
             content: MessageContent::Text("cc".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(rk.clone(), 100),
+        conversation: ConversationSnapshot { route_key: rk.clone(), conversation_id: "user_456".into(), peer_id: "user_456".into(), conversation_type: ConversationType::Direct, participants: vec![], message_count: 0, last_active_secs: 0 },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
@@ -86,7 +86,7 @@ async fn test_user_agent_preference_closed_loop() {
             content: MessageContent::Text("/openclaw".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(rk.clone(), 100),
+        conversation: ConversationSnapshot { route_key: rk.clone(), conversation_id: "user_456".into(), peer_id: "user_456".into(), conversation_type: ConversationType::Direct, participants: vec![], message_count: 0, last_active_secs: 0 },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
@@ -119,7 +119,7 @@ async fn test_user_agent_preference_closed_loop() {
             content: MessageContent::Text("帮我总结一下".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(rk.clone(), 100),
+        conversation: ConversationSnapshot { route_key: rk.clone(), conversation_id: "user_456".into(), peer_id: "user_456".into(), conversation_type: ConversationType::Direct, participants: vec![], message_count: 0, last_active_secs: 0 },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
@@ -150,7 +150,7 @@ async fn test_user_agent_preference_closed_loop() {
             content: MessageContent::Text("当前 agent".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(rk.clone(), 100),
+        conversation: ConversationSnapshot { route_key: rk.clone(), conversation_id: "user_456".into(), peer_id: "user_456".into(), conversation_type: ConversationType::Direct, participants: vec![], message_count: 0, last_active_secs: 0 },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
@@ -180,7 +180,7 @@ async fn test_user_agent_preference_closed_loop() {
             content: MessageContent::Text("这是一条消息".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(rk2.clone(), 100),
+        conversation: ConversationSnapshot { route_key: rk2.clone().clone(), conversation_id: "user_456".into(), peer_id: "user_456".into(), conversation_type: ConversationType::Direct, participants: vec![], message_count: 0, last_active_secs: 0 },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
@@ -248,15 +248,20 @@ async fn test_user_agent_preference_isolation_by_account() {
             content: MessageContent::Text("cc".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(
-            RouteKey::new(
+        conversation: ConversationSnapshot {
+            route_key: RouteKey::new(
                 ChannelId::new("wechat"),
                 "conv_1",
                 "user_123",
                 ConversationType::Direct,
             ),
-            100,
-        ),
+            conversation_id: "conv_1".into(),
+            peer_id: "user_123".into(),
+            conversation_type: ConversationType::Direct,
+            participants: vec![],
+            message_count: 0,
+            last_active_secs: 0,
+        },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
@@ -281,15 +286,20 @@ async fn test_user_agent_preference_isolation_by_account() {
             content: MessageContent::Text("cx".into()),
             audit_mark: None,
         },
-        conversation: Conversation::new(
-            RouteKey::new(
+        conversation: ConversationSnapshot {
+            route_key: RouteKey::new(
                 ChannelId::new("dingtalk"),
                 "conv_1",
                 "user_123",
                 ConversationType::Direct,
             ),
-            100,
-        ),
+            conversation_id: "conv_1".into(),
+            peer_id: "user_123".into(),
+            conversation_type: ConversationType::Direct,
+            participants: vec![],
+            message_count: 0,
+            last_active_secs: 0,
+        },
         config: config.clone(),
         ai_response: None,
         short_circuit: false,
