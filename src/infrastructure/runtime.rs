@@ -203,8 +203,17 @@ impl AppRuntime {
             }
         }
 
-        let conn = db::init_db(&config.db_path)?;
-        let db_pool = DbPool::new(conn);
+        // Pool size: production default is max(4, num_cpus). Set
+        // MAGICLAW_DB_POOL_SIZE=N to override (N=1 forces single-connection mode).
+        let pool_size: usize = match std::env::var("MAGICLAW_DB_POOL_SIZE") {
+            Ok(s) => s.parse().unwrap_or(4).max(1),
+            Err(_) => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .max(4),
+        };
+        let db_pool = db::init_db_pool(&config.db_path, pool_size)
+            .map_err(|e| format!("init_db_pool failed: {}", e))?;
         let api_client_registry = Arc::new(ApiClientRegistry::new(db_pool.clone()));
 
         let dedup_cache = Arc::new(MokaDedupCache::new(

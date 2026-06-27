@@ -1,16 +1,91 @@
 use rusqlite::Connection;
+use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
-/// Shared database connection pool (single connection with mutex).
+/// Shared database connection pool.
+///
+/// Holds a small pool of `Connection` handles; `execute`/`query` checkout a
+/// connection, run the closure, and return it. The API surface is identical
+/// to the previous single-connection pool, so callers (every adapter) do not
+/// change. Concurrent workers no longer block on a single mutex; they
+/// parallelize up to `pool_size`.
+///
+/// `pool_size = 1` preserves the previous single-connection behaviour for
+/// tests that opt in. Production defaults to `max(4, num_cpus)` via
+/// `init_db_pool`.
+///
+/// Note: rusqlite's `Connection` is `!Sync`, so the pool works correctly
+/// only when each connection is held by at most one thread at a time. The
+/// check-out / check-in discipline enforced below guarantees this.
 #[derive(Clone)]
 pub struct DbPool {
-    conn: Arc<Mutex<Connection>>,
+    inner: Arc<DbPoolInner>,
+}
+
+struct DbPoolInner {
+    /// Free connections plus the number currently in use (tracked by `available`).
+    connections: Mutex<VecDeque<Connection>>,
+    /// Maximum number of connections allowed.
+    capacity: usize,
+    /// Notified when a connection is returned to the pool.
+    cvar: Condvar,
 }
 
 impl DbPool {
+    /// Build a pool from a single connection. Equivalent to a single-connection pool.
     pub fn new(conn: Connection) -> Self {
-        Self { conn: Arc::new(Mutex::new(conn)) }
+        let mut q = VecDeque::new();
+        q.push_back(conn);
+        Self {
+            inner: Arc::new(DbPoolInner {
+                connections: Mutex::new(q),
+                capacity: 1,
+                cvar: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Build a pool with `pool_size` connections, all initialised with the
+    /// production schema. Use `init_db_pool(path, size)` from runtime startup;
+    /// tests should prefer `DbPool::new(init_db(":memory:")?)`.
+    pub fn with_capacity(conns: Vec<Connection>, capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(DbPoolInner {
+                connections: Mutex::new(VecDeque::from(conns)),
+                capacity,
+                cvar: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Maximum number of connections this pool may hold.
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity
+    }
+
+    /// Check out a connection for the duration of the closure.
+    fn with_conn<F, T>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&Connection) -> Result<T, rusqlite::Error>,
+    {
+        let mut guard = self.inner.connections.lock().unwrap_or_else(|e| e.into_inner());
+        // Wait until a connection is available (avoids unbounded growth).
+        while guard.is_empty() {
+            guard = self.inner.cvar.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
+        let conn = guard.pop_front().expect("non-empty after wait");
+        drop(guard);
+
+        // Run the closure on a freshly-checked-out connection.
+        let result = f(&conn);
+
+        // Return the connection regardless of result.
+        let mut guard = self.inner.connections.lock().unwrap_or_else(|e| e.into_inner());
+        guard.push_back(conn);
+        self.inner.cvar.notify_one();
+
+        result.map_err(|e| e.to_string())
     }
 
     /// Execute a write operation. The closure should return Ok(()) on success.
@@ -18,8 +93,7 @@ impl DbPool {
     where
         F: FnOnce(&Connection) -> Result<(), rusqlite::Error>,
     {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        f(&conn).map_err(|e| e.to_string())
+        self.with_conn(f)
     }
 
     /// Execute a read operation and return a value.
@@ -27,9 +101,21 @@ impl DbPool {
     where
         F: FnOnce(&Connection) -> Result<T, rusqlite::Error>,
     {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        f(&conn).map_err(|e| e.to_string())
+        self.with_conn(f)
     }
+}
+
+/// Initialise a connection pool with `size` connections, each carrying the
+/// production schema. `size = 1` is valid (single-connection pool); larger
+/// values enable parallel queries from concurrent workers.
+pub fn init_db_pool(path: impl AsRef<Path>, size: usize) -> Result<DbPool, rusqlite::Error> {
+    let size = size.max(1);
+    let mut conns = Vec::with_capacity(size);
+    for _ in 0..size {
+        let conn = init_db(&path)?;
+        conns.push(conn);
+    }
+    Ok(DbPool::with_capacity(conns, size))
 }
 
 /// Initialize the SQLite database with the required schema.
