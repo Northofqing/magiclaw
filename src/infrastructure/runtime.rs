@@ -1378,10 +1378,11 @@ impl AppRuntime {
                     )
                 }),
             )
-            .with_state(state)
-            // TODO: auth disabled temporarily for testing; will re-enable after validating performance baseline
-            // .layer(from_fn_with_state(auth, require_bearer_auth));
-            ;
+            .with_state(state.clone())
+            .layer(from_fn_with_state(
+                auth.clone(),
+                require_bearer_auth,
+            ));
 
         let addr: std::net::SocketAddr = addr
             .parse()

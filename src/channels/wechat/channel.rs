@@ -15,31 +15,31 @@ use super::media::{FileMediaSource, MediaLocation, DEFAULT_CHUNK_BYTES};
 
 #[derive(Debug)]
 struct SessionState {
-    /// Map from user_id to context_token (per-user token cache)
-    context_tokens: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// Map from user_id to context_token (per-user token cache).
+    /// Protected by the outer Arc<tokio::sync::Mutex<SessionState>>.
+    context_tokens: HashMap<String, String>,
     sync_buf: String,
 }
 
 impl SessionState {
-    pub async fn get_context_token(&self, user_id: &str) -> Option<String> {
-        self.context_tokens.read().await.get(user_id).cloned()
+    pub fn get_context_token(&self, user_id: &str) -> Option<String> {
+        self.context_tokens.get(user_id).cloned()
     }
 
-    pub async fn set_context_token(&self, user_id: String, token: String) {
-        self.context_tokens.write().await.insert(user_id, token);
+    pub fn set_context_token(&mut self, user_id: String, token: String) {
+        self.context_tokens.insert(user_id, token);
     }
 
-    pub async fn clear_context_tokens(&self) {
-        self.context_tokens.write().await.clear();
+    pub fn clear_context_tokens(&mut self) {
+        self.context_tokens.clear();
     }
 }
 
-use std::sync::Arc;
 
 enum WeChatMode {
     Stub,
     ILink {
-        config: ILinkSendConfig,
+        config: Box<ILinkSendConfig>,
         client: reqwest::Client,
         session: std::sync::Arc<tokio::sync::Mutex<SessionState>>,
         sync_store: Option<std::sync::Arc<dyn SyncBufStore>>,
@@ -108,10 +108,10 @@ impl WeChatChannel {
             return Self {
                 channel_id: ChannelId::new("wechat"),
                 mode: WeChatMode::ILink {
-                    config: ilink_cfg,
+                    config: Box::new(ilink_cfg),
                     client: reqwest::Client::new(),
                     session: std::sync::Arc::new(tokio::sync::Mutex::new(SessionState {
-                        context_tokens: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+                        context_tokens: HashMap::new(),
                         sync_buf,
                     })),
                     sync_store,
@@ -220,9 +220,9 @@ impl Channel for WeChatChannel {
                     // Load persisted tokens from database at startup for crash recovery
                     if let Some(store) = &poll_token_store {
                         if let Ok(persisted_tokens) = store.get_all(&poll_account_id) {
-                            let state = poll_session.lock().await;
+                            let mut state = poll_session.lock().await;
                             for (user_id, token) in persisted_tokens {
-                                state.set_context_token(user_id, token).await;
+                                state.set_context_token(user_id, token);
                             }
                         }
                     }
@@ -238,8 +238,8 @@ impl Channel for WeChatChannel {
                                     errmsg = %errmsg,
                                     "wechat session expired (-14): clearing all context tokens"
                                 );
-                                let state = poll_session.lock().await;
-                                state.clear_context_tokens().await;
+                                let mut state = poll_session.lock().await;
+                                state.clear_context_tokens();
                                 drop(state);
                                 // Also clear persisted tokens from database
                                 if let Some(store) = &poll_token_store {
@@ -328,8 +328,8 @@ impl Channel for WeChatChannel {
                             
                             if let Some(user_id) = token_user_id {
                                 if let Some(ctx) = extract_latest_context_token(std::slice::from_ref(&msg), Some(&user_id)) {
-                                    let state = poll_session.lock().await;
-                                    state.set_context_token(user_id.clone(), ctx.clone()).await;
+                                    let mut state = poll_session.lock().await;
+                                    state.set_context_token(user_id.clone(), ctx.clone());
                                     drop(state);
                                     // Also persist token to database for crash recovery
                                     if let Some(store) = &poll_token_store {
@@ -386,7 +386,7 @@ impl Channel for WeChatChannel {
                 // (it is a 35s long-poll, not a keepalive ping). The correct pattern is:
                 //   background poller updates context_token → stored context_token used here.
                 let state = session.lock().await;
-                let context_token = state.get_context_token(to).await
+                let context_token = state.get_context_token(to)
                     .ok_or_else(|| format!("wechat: no context_token cached for user {}", to))?;
                 let mut send_cfg = config.clone();
                 send_cfg.context_token = context_token;

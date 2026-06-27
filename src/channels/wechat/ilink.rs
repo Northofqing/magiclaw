@@ -602,7 +602,7 @@ pub fn decrypt_aes_128_ecb_pkcs7(encrypted: &[u8], key: &[u8; 16]) -> Result<Vec
     if encrypted.is_empty() {
         return Err(DecryptError::EmptyInput);
     }
-    if encrypted.len() % 16 != 0 {
+    if !encrypted.len().is_multiple_of(16) {
         return Err(DecryptError::InvalidPadding);
     }
 
@@ -636,7 +636,7 @@ pub fn encrypt_aes_128_ecb_pkcs7(plaintext: &[u8], key: &[u8; 16]) -> Vec<u8> {
 
     let mut padded = Vec::with_capacity(plaintext.len() + pad_len);
     padded.extend_from_slice(plaintext);
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+    padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
 
     let cipher = aes::Aes128::new(GenericArray::from_slice(key));
     for chunk in padded.chunks_exact_mut(16) {
@@ -996,6 +996,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn from_wechat_config_requires_complete_fields() {
         let mut cfg = WeChatConfig::default();
         cfg.enabled = true;

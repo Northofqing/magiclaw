@@ -166,7 +166,7 @@ pub fn parse_webhook_event(
     };
 
     let content_json: serde_json::Value = serde_json::from_str(&event.message.content)
-        .unwrap_or_else(|_| serde_json::Value::Null);
+        .unwrap_or(serde_json::Value::Null);
     let content = match event.message.message_type.as_str() {
         "text" => content_json
             .get("text")
@@ -304,7 +304,7 @@ struct SessionState {
 enum FeishuMode {
     Stub,
     OpenApi {
-        config: FeishuConfig,
+        config: Box<FeishuConfig>,
         client: reqwest::Client,
         session: std::sync::Arc<tokio::sync::Mutex<SessionState>>,
     },
@@ -368,17 +368,20 @@ fn file_name_from_url(url: &str, fallback: &str) -> String {
     fallback.to_string()
 }
 
-async fn upload_media(
-    client: &reqwest::Client,
-    cfg: &FeishuConfig,
-    token: &str,
-    endpoint: &str,
-    media_field: &str,
-    type_field: &str,
-    type_value: &str,
-    source: &str,
-    fallback_name: &str,
-) -> Result<FeishuUploadData, String> {
+struct UploadMediaParams<'a> {
+    client: &'a reqwest::Client,
+    cfg: &'a FeishuConfig,
+    token: &'a str,
+    endpoint: &'a str,
+    media_field: &'a str,
+    type_field: &'a str,
+    type_value: &'a str,
+    source: &'a str,
+    fallback_name: &'a str,
+}
+
+async fn upload_media(params: &UploadMediaParams<'_>) -> Result<FeishuUploadData, String> {
+    let &UploadMediaParams { client, cfg, token, endpoint, media_field, type_field, type_value, source, fallback_name } = params;
     let (part, filename) = if let Some(path_text) = source.strip_prefix("file://") {
         let path = std::path::Path::new(path_text);
         let file = tokio::fs::File::open(path)
@@ -590,7 +593,7 @@ impl FeishuChannel {
                     session: std::sync::Arc::new(tokio::sync::Mutex::new(SessionState {
                         tenant_access_token: cfg.tenant_access_token.clone(),
                     })),
-                    config: cfg,
+                    config: Box::new(cfg.clone()),
                 },
             };
         }
@@ -643,17 +646,17 @@ impl Channel for FeishuChannel {
                                 serde_json::json!({ "image_key": url }).to_string(),
                             )
                         } else {
-                            let uploaded = upload_media(
+                            let uploaded = upload_media(&UploadMediaParams {
                                 client,
-                                config,
-                                &token,
-                                "/open-apis/im/v1/images",
-                                "image",
-                                "image_type",
-                                "message",
-                                url,
-                                "image.bin",
-                            )
+                                cfg: config,
+                                token: &token,
+                                endpoint: "/open-apis/im/v1/images",
+                                media_field: "image",
+                                type_field: "image_type",
+                                type_value: "message",
+                                source: url,
+                                fallback_name: "image.bin",
+                            })
                             .await?;
                             if uploaded.image_key.trim().is_empty() {
                                 return Err("feishu image upload returned empty image_key".into());
@@ -674,17 +677,17 @@ impl Channel for FeishuChannel {
                                 serde_json::json!({ "file_key": url }).to_string(),
                             )
                         } else {
-                        let uploaded = upload_media(
+                        let uploaded = upload_media(&UploadMediaParams {
                             client,
-                            config,
-                            &token,
-                            "/open-apis/im/v1/files",
-                            "file",
-                            "file_type",
-                            "stream",
-                            url,
-                            if name.trim().is_empty() { "file.bin" } else { name },
-                        )
+                            cfg: config,
+                            token: &token,
+                            endpoint: "/open-apis/im/v1/files",
+                            media_field: "file",
+                            type_field: "file_type",
+                            type_value: "stream",
+                            source: url,
+                            fallback_name: if name.trim().is_empty() { "file.bin" } else { name },
+                        })
                         .await?;
                         let file_key = if uploaded.file_key.trim().is_empty() {
                             // Backward compatible path: treat url as a pre-uploaded file_key.

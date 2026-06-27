@@ -85,6 +85,6 @@ mod tests {
         let db = make_pool();
         write_audit(&db, None, "startup", "ok").unwrap();
         let records = query_audit_logs(&db, None, 10).unwrap();
-        assert!(records.len() >= 1);
+        assert!(!records.is_empty());
     }
 }

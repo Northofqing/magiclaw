@@ -31,11 +31,16 @@ pub async fn process_pending(
     };
 
     for entry in entries {
-        outbox.mark_status(&entry.id, OutboxStatus::Sending, None).ok();
+        if let Err(e) = outbox.mark_status(&entry.id, OutboxStatus::Sending, None) {
+            tracing::error!(message_id = %entry.id, error = %e, "failed to mark sending, skipping");
+            continue;
+        }
 
         match sender.send(&entry).await {
             Ok(()) => {
-                outbox.mark_status(&entry.id, OutboxStatus::Sent, None).ok();
+                if let Err(e) = outbox.mark_status(&entry.id, OutboxStatus::Sent, None) {
+                    tracing::error!(message_id = %entry.id, error = %e, "failed to mark sent (message already sent)");
+                }
                 audit.record(Some(&entry.route_key), "send", "sent");
                 tracing::debug!(message_id = %entry.id, "outbox message sent");
             }
@@ -43,7 +48,9 @@ pub async fn process_pending(
                 let new_count = entry.retry_count + 1;
                 if new_count >= retry.max_retries {
                     // Move to dead letter
-                    outbox.mark_status(&entry.id, OutboxStatus::DeadLetter, Some(&err)).ok();
+                    if let Err(e) = outbox.mark_status(&entry.id, OutboxStatus::DeadLetter, Some(&err)) {
+                        tracing::error!(message_id = %entry.id, error = %e, "failed to mark dead letter");
+                    }
                     let dl_entry = DeadLetterEntry::new(
                         &entry.id,
                         "outbox",
@@ -51,7 +58,9 @@ pub async fn process_pending(
                         format!("max retries ({}): {}", new_count, err),
                         chrono::Utc::now().timestamp(),
                     );
-                    dlq.insert(&dl_entry).ok();
+                    if let Err(e) = dlq.insert(&dl_entry) {
+                        tracing::error!(message_id = %entry.id, error = %e, "failed to insert dead letter entry");
+                    }
                     audit.record(
                         Some(&entry.route_key),
                         "dead_letter",
@@ -60,7 +69,9 @@ pub async fn process_pending(
                     tracing::warn!(message_id = %entry.id, retry_count = new_count, "moved to dead letter queue");
                 } else {
                     let next_at = chrono::Utc::now().timestamp_millis() + retry.next_delay_ms(new_count) as i64;
-                    outbox.mark_retrying(&entry.id, new_count, next_at, &err).ok();
+                    if let Err(e) = outbox.mark_retrying(&entry.id, new_count, next_at, &err) {
+                        tracing::error!(message_id = %entry.id, error = %e, "failed to mark retrying");
+                    }
                     audit.record(
                         Some(&entry.route_key),
                         "send",
@@ -92,18 +103,25 @@ pub async fn process_retries(
     };
 
     for entry in entries {
-        outbox.mark_status(&entry.id, OutboxStatus::Sending, None).ok();
+        if let Err(e) = outbox.mark_status(&entry.id, OutboxStatus::Sending, None) {
+            tracing::error!(message_id = %entry.id, error = %e, "failed to mark retry sending, skipping");
+            continue;
+        }
 
         match sender.send(&entry).await {
             Ok(()) => {
-                outbox.mark_status(&entry.id, OutboxStatus::Sent, None).ok();
+                if let Err(e) = outbox.mark_status(&entry.id, OutboxStatus::Sent, None) {
+                    tracing::error!(message_id = %entry.id, error = %e, "failed to mark sent (message already sent on retry)");
+                }
                 audit.record(Some(&entry.route_key), "send", "sent");
                 tracing::info!(message_id = %entry.id, "outbox retry succeeded");
             }
             Err(err) => {
                 let new_count = entry.retry_count + 1;
                 if new_count >= retry.max_retries {
-                    outbox.mark_status(&entry.id, OutboxStatus::DeadLetter, Some(&err)).ok();
+                    if let Err(e) = outbox.mark_status(&entry.id, OutboxStatus::DeadLetter, Some(&err)) {
+                        tracing::error!(message_id = %entry.id, error = %e, "failed to mark dead letter on retry");
+                    }
                     let dl_entry = DeadLetterEntry::new(
                         &entry.id,
                         "outbox",
@@ -111,7 +129,9 @@ pub async fn process_retries(
                         format!("max retries ({}): {}", new_count, err),
                         chrono::Utc::now().timestamp(),
                     );
-                    dlq.insert(&dl_entry).ok();
+                    if let Err(e) = dlq.insert(&dl_entry) {
+                        tracing::error!(message_id = %entry.id, error = %e, "failed to insert dead letter entry on retry");
+                    }
                     audit.record(
                         Some(&entry.route_key),
                         "dead_letter",
@@ -120,7 +140,9 @@ pub async fn process_retries(
                     tracing::warn!(message_id = %entry.id, "moved to dead letter after {} retries", new_count);
                 } else {
                     let next_at = chrono::Utc::now().timestamp_millis() + retry.next_delay_ms(new_count) as i64;
-                    outbox.mark_retrying(&entry.id, new_count, next_at, &err).ok();
+                    if let Err(e) = outbox.mark_retrying(&entry.id, new_count, next_at, &err) {
+                        tracing::error!(message_id = %entry.id, error = %e, "failed to mark retrying on retry");
+                    }
                     audit.record(
                         Some(&entry.route_key),
                         "send",
