@@ -52,11 +52,11 @@ impl CircuitBreaker {
 
     /// Check if a request should be allowed through.
     pub fn allow_request(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         match *state {
             CircuitState::Closed => true,
             CircuitState::Open => {
-                if let Some(opened) = *self.opened_at.lock().unwrap() {
+                if let Some(opened) = *self.opened_at.lock().unwrap_or_else(|e| e.into_inner()) {
                     if opened.elapsed() >= self.config.timeout {
                         *state = CircuitState::HalfOpen;
                         self.failure_count.store(0, Ordering::SeqCst);
@@ -74,7 +74,7 @@ impl CircuitBreaker {
                 // If so, revert to Open to await the full timeout again.
                 if self.failure_count.load(Ordering::SeqCst) >= self.config.half_open_max {
                     let should_revert = {
-                        if let Some(opened) = *self.opened_at.lock().unwrap() {
+                        if let Some(opened) = *self.opened_at.lock().unwrap_or_else(|e| e.into_inner()) {
                             opened.elapsed() >= self.config.timeout
                         } else {
                             false
@@ -82,7 +82,7 @@ impl CircuitBreaker {
                     };
                     if should_revert {
                         *state = CircuitState::Open;
-                        *self.opened_at.lock().unwrap() = Some(Instant::now());
+                        *self.opened_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                         self.failure_count.store(0, Ordering::SeqCst);
                         tracing::warn!(
                             "circuit breaker: HalfOpen → Open (probes exhausted)"
@@ -98,7 +98,7 @@ impl CircuitBreaker {
 
     /// Record a successful request.
     pub fn record_success(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.failure_count.store(0, Ordering::SeqCst);
         if *state == CircuitState::HalfOpen {
             *state = CircuitState::Closed;
@@ -115,10 +115,10 @@ impl CircuitBreaker {
         );
 
         if count >= self.config.failure_threshold {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if *state == CircuitState::Closed {
                 *state = CircuitState::Open;
-                *self.opened_at.lock().unwrap() = Some(Instant::now());
+                *self.opened_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                 tracing::warn!(
                     failures = count,
                     "circuit breaker: Closed → Open"
@@ -129,7 +129,7 @@ impl CircuitBreaker {
 
     /// Current state of the breaker.
     pub fn state(&self) -> CircuitState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
