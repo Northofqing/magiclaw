@@ -1,128 +1,22 @@
 use std::env;
 use std::fs;
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-
-use fs2::FileExt;
 
 use magiclaw::adapters::api_client_registry::ApiClientRegistry;
 use magiclaw::adapters::mcp::server::McpServer;
 use magiclaw::adapters::sqlite_context_tokens::SqliteContextTokenStore;
 use magiclaw::channels::wechat::ilink::{send_text_via_ilink, ILinkSendConfig};
+use magiclaw::cli::commands::*;
+use magiclaw::cli::parser::parse_cli_args;
+use magiclaw::daemon::singleton;
+use magiclaw::domain::ports::context_token_store::ContextTokenStore;
 use magiclaw::infrastructure::config::AppConfig;
 use magiclaw::infrastructure::runtime::AppRuntime;
 use magiclaw::infrastructure::tracing_init;
-use magiclaw::domain::ports::context_token_store::ContextTokenStore;
 use serde::{Deserialize, Serialize};
 
 /// Default HTTP API address for the magiclaw daemon (matches weclaw convention).
 const DEFAULT_API_ADDR: &str = "127.0.0.1:18011";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CliCommand {
-    Daemon,
-    Mcp,
-    Send(SendCommand),
-    Auth(AuthCommand),
-    WeChat(WechatCommand),
-    BindImport(ImportCommand),
-    PushImport(ImportCommand),
-    PushRun(String),
-    ProjectList,
-    BindingList(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AuthCommand {
-    Issue(AuthIssueCommand),
-    List(AuthListCommand),
-    Revoke(AuthRevokeCommand),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WechatCommand {
-    Login(WechatLoginCommand),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WechatLoginCommand {
-    data_dir: Option<String>,
-    account_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AuthIssueCommand {
-    project_id: String,
-    client_name: String,
-    scopes: Vec<String>,
-    ttl_secs: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AuthListCommand {
-    project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AuthRevokeCommand {
-    token: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SendChannel {
-    Wechat,
-    Feishu,
-}
-
-impl SendChannel {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "wechat" | "weixin" | "wx" => Ok(SendChannel::Wechat),
-            "feishu" | "lark" => Ok(SendChannel::Feishu),
-            other => Err(format!("unknown channel: '{}' (expected: wechat | feishu)", other)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SendCommand {
-    channel: SendChannel,
-    data_dir: String,
-    to: Option<String>,
-    context_token: Option<String>,
-    receive_id_type: Option<String>,
-    message: String,
-}
-
-/// File-import command: exactly one of jsonl/csv is set.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ImportCommand {
-    format: ImportFormat,
-    path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ImportFormat {
-    Jsonl,
-    Csv,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ProjectWechatAccount {
-    token: String,
-    #[serde(rename = "baseUrl")]
-    base_url: String,
-    #[serde(rename = "accountId")]
-    account_id: String,
-    #[serde(rename = "userId", default)]
-    user_id: Option<String>,
-    #[serde(rename = "savedAt", skip_serializing_if = "Option::is_none")]
-    saved_at: Option<String>,
-}
-
-fn usage() -> &'static str {
-    "Usage:\n  magiclaw                Start daemon mode\n  magiclaw --mcp          Start MCP server mode\n  magiclaw send --message <text> [--channel <wechat|feishu>] [--to <recipient>] [--receive-id-type <type>] [--context-token <token>] [--data-dir <wechat-dir>]\n  magiclaw auth issue --project <project_id> --name <client_name> --scopes send,window_status --ttl-secs <secs>\n  magiclaw auth list [--project <project_id>]\n  magiclaw auth revoke --token <raw_token>\n  magiclaw wechat login [--data-dir <dir>] [--account-id <id>]\n  magiclaw bind import (--jsonl <path> | --csv <path>)\n  magiclaw push import (--jsonl <path> | --csv <path>)\n  magiclaw push run --job <job_id>\n  magiclaw project list\n  magiclaw binding list --project <project_key>\n\nChannels:\n  --channel wechat (default)  Send via WeChat (ilink). Recipient inferred from context tokens if omitted.\n  --channel feishu            Send via Feishu OpenAPI. --to is required (open_id/chat_id/...).\n                              receive_id_type auto-detected from prefix (oc_->chat_id, ou_->open_id) or via --receive-id-type.\n\nEnvironment:\n  MAGICLAW_DB_PATH      SQLite database path shared by daemon and auth commands\n  WECHAT_CHANNEL_DIR    Default WeChat data directory (fallback: ~/.claude/channels/wechat)\n  MAGICLAW_API_TOKEN    Optional bearer token for localhost daemon /api/send and /api/window_status\n  MAGICLAW_API_SEND_DEBUG  Set to 1/true to include diagnostics in /api/send responses\n  FEISHU_*              Feishu channel config (APP_ID, APP_SECRET, RECEIVE_ID_TYPE, ...)"
-}
 fn resolve_db_path() -> String {
     env::var("MAGICLAW_DB_PATH")
         .ok()
@@ -173,293 +67,6 @@ fn load_project_wechat_account(data_dir: &Path) -> Result<ProjectWechatAccount, 
 
 fn open_context_token_store() -> Result<SqliteContextTokenStore, Box<dyn std::error::Error>> {
     Ok(SqliteContextTokenStore::open(resolve_db_path())?)
-}
-
-fn parse_cli_args(args: &[String]) -> Result<CliCommand, String> {
-    if args.len() <= 1 {
-        return Ok(CliCommand::Daemon);
-    }
-
-    if args[1] == "--mcp" || args[1] == "mcp" {
-        if args.len() != 2 {
-            return Err(format!("--mcp does not accept extra arguments\n{}", usage()));
-        }
-        return Ok(CliCommand::Mcp);
-    }
-
-    if args[1] == "bind" {
-        return parse_bind_args(&args[2..]);
-    }
-
-    if args[1] == "push" {
-        return parse_push_args(&args[2..]);
-    }
-
-    if args[1] == "auth" {
-        return parse_auth_args(&args[2..]).map(CliCommand::Auth);
-    }
-
-    if args[1] == "project" {
-        if args.get(2).map(String::as_str) == Some("list") && args.len() == 3 {
-            return Ok(CliCommand::ProjectList);
-        }
-        return Err(format!("usage: magiclaw project list\n{}", usage()));
-    }
-
-    if args[1] == "binding" {
-        return parse_binding_args(&args[2..]);
-    }
-
-    if args[1] == "wechat" {
-        return parse_wechat_args(&args[2..]).map(CliCommand::WeChat);
-    }
-
-    if args[1] != "send" {
-        return Err(format!("unknown command: {}\n{}", args[1], usage()));
-    }
-
-    let mut data_dir = None::<String>;
-    let mut to: Option<String> = None;
-    let mut context_token: Option<String> = None;
-    let mut message: Option<String> = None;
-    let mut channel: Option<SendChannel> = None;
-    let mut receive_id_type: Option<String> = None;
-
-    let mut index = 2;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--channel" => {
-                index += 1;
-                let value = args.get(index).ok_or_else(|| format!("missing value for --channel\n{}", usage()))?;
-                channel = Some(SendChannel::parse(value).map_err(|e| format!("{}\n{}", e, usage()))?);
-            }
-            "--receive-id-type" => {
-                index += 1;
-                let value = args.get(index).ok_or_else(|| format!("missing value for --receive-id-type\n{}", usage()))?;
-                receive_id_type = Some(value.clone());
-            }
-            "--data-dir" => {
-                index += 1;
-                let value = args.get(index).ok_or_else(|| format!("missing value for --data-dir\n{}", usage()))?;
-                data_dir = Some(value.clone());
-            }
-            "--to" => {
-                index += 1;
-                let value = args.get(index).ok_or_else(|| format!("missing value for --to\n{}", usage()))?;
-                to = Some(value.clone());
-            }
-            "--message" | "--text" => {
-                index += 1;
-                let value = args.get(index).ok_or_else(|| format!("missing value for --message\n{}", usage()))?;
-                message = Some(value.clone());
-            }
-            "--context-token" => {
-                index += 1;
-                let value = args.get(index).ok_or_else(|| format!("missing value for --context-token\n{}", usage()))?;
-                context_token = Some(value.clone());
-            }
-            "--help" | "-h" => {
-                return Err(usage().to_string());
-            }
-            other => {
-                return Err(format!("unknown flag: {}\n{}", other, usage()));
-            }
-        }
-        index += 1;
-    }
-
-    let message = message.ok_or_else(|| format!("missing required flag: --message\n{}", usage()))?;
-
-    Ok(CliCommand::Send(SendCommand {
-        channel: channel.unwrap_or(SendChannel::Wechat),
-        data_dir: data_dir.unwrap_or_default(),
-        to,
-        context_token,
-        receive_id_type,
-        message,
-    }))
-}
-
-/// Parse `import (--jsonl <path> | --csv <path>)` shared by bind/push.
-fn parse_import_command(args: &[String]) -> Result<ImportCommand, String> {
-    if args.first().map(String::as_str) != Some("import") {
-        return Err(format!("expected `import` subcommand\n{}", usage()));
-    }
-    let rest = &args[1..];
-    let mut format: Option<ImportFormat> = None;
-    let mut path: Option<String> = None;
-    let mut index = 0;
-    while index < rest.len() {
-        match rest[index].as_str() {
-            "--jsonl" | "--csv" => {
-                let fmt = if rest[index] == "--jsonl" { ImportFormat::Jsonl } else { ImportFormat::Csv };
-                index += 1;
-                let value = rest.get(index).ok_or_else(|| format!("missing path for {}\n{}", rest[index - 1], usage()))?;
-                format = Some(fmt);
-                path = Some(value.clone());
-            }
-            other => return Err(format!("unknown flag: {}\n{}", other, usage())),
-        }
-        index += 1;
-    }
-    let format = format.ok_or_else(|| format!("missing --jsonl or --csv\n{}", usage()))?;
-    let path = path.ok_or_else(|| format!("missing import path\n{}", usage()))?;
-    Ok(ImportCommand { format, path })
-}
-
-fn parse_bind_args(args: &[String]) -> Result<CliCommand, String> {
-    parse_import_command(args).map(CliCommand::BindImport)
-}
-
-fn parse_push_args(args: &[String]) -> Result<CliCommand, String> {
-    match args.first().map(String::as_str) {
-        Some("import") => parse_import_command(args).map(CliCommand::PushImport),
-        Some("run") => {
-            let rest = &args[1..];
-            if rest.len() == 2 && rest[0] == "--job" {
-                Ok(CliCommand::PushRun(rest[1].clone()))
-            } else {
-                Err(format!("usage: magiclaw push run --job <job_id>\n{}", usage()))
-            }
-        }
-        _ => Err(format!("usage: magiclaw push (import ... | run --job <id>)\n{}", usage())),
-    }
-}
-
-fn parse_binding_args(args: &[String]) -> Result<CliCommand, String> {
-    if args.len() == 3 && args[0] == "list" && args[1] == "--project" {
-        return Ok(CliCommand::BindingList(args[2].clone()));
-    }
-    Err(format!("usage: magiclaw binding list --project <project_key>\n{}", usage()))
-}
-
-fn parse_scopes(value: &str) -> Result<Vec<String>, String> {
-    let scopes: Vec<String> = value
-        .split(',')
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_string())
-        .collect();
-    if scopes.is_empty() {
-        return Err("scopes cannot be empty".into());
-    }
-    Ok(scopes)
-}
-
-fn parse_auth_args(args: &[String]) -> Result<AuthCommand, String> {
-    match args.first().map(String::as_str) {
-        Some("issue") => {
-            let mut project_id = None::<String>;
-            let mut client_name = None::<String>;
-            let mut scopes = None::<Vec<String>>;
-            let mut ttl_secs = 86_400_i64;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--project" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --project\n{}", usage()))?;
-                        project_id = Some(value.clone());
-                    }
-                    "--name" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --name\n{}", usage()))?;
-                        client_name = Some(value.clone());
-                    }
-                    "--scopes" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --scopes\n{}", usage()))?;
-                        scopes = Some(parse_scopes(value)?);
-                    }
-                    "--ttl-secs" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --ttl-secs\n{}", usage()))?;
-                        ttl_secs = value
-                            .parse::<i64>()
-                            .map_err(|e| format!("invalid --ttl-secs value: {}", e))?;
-                    }
-                    "--help" | "-h" => return Err(usage().to_string()),
-                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
-                }
-                index += 1;
-            }
-            Ok(AuthCommand::Issue(AuthIssueCommand {
-                project_id: project_id.ok_or_else(|| format!("missing required flag: --project\n{}", usage()))?,
-                client_name: client_name.ok_or_else(|| format!("missing required flag: --name\n{}", usage()))?,
-                scopes: scopes.ok_or_else(|| format!("missing required flag: --scopes\n{}", usage()))?,
-                ttl_secs,
-            }))
-        }
-        Some("list") => {
-            let mut project_id = None::<String>;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--project" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --project\n{}", usage()))?;
-                        project_id = Some(value.clone());
-                    }
-                    "--help" | "-h" => return Err(usage().to_string()),
-                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
-                }
-                index += 1;
-            }
-            Ok(AuthCommand::List(AuthListCommand { project_id }))
-        }
-        Some("revoke") => {
-            let mut token = None::<String>;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--token" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --token\n{}", usage()))?;
-                        token = Some(value.clone());
-                    }
-                    "--help" | "-h" => return Err(usage().to_string()),
-                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
-                }
-                index += 1;
-            }
-            Ok(AuthCommand::Revoke(AuthRevokeCommand {
-                token: token.ok_or_else(|| format!("missing required flag: --token\n{}", usage()))?,
-            }))
-        }
-        _ => Err(format!("usage: magiclaw auth (issue|list|revoke)\n{}", usage())),
-    }
-}
-
-fn parse_wechat_args(args: &[String]) -> Result<WechatCommand, String> {
-    match args.first().map(String::as_str) {
-        Some("login") => {
-            let mut data_dir = None::<String>;
-            let mut account_id = None::<String>;
-            let mut index = 1;
-            while index < args.len() {
-                match args[index].as_str() {
-                    "--data-dir" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --data-dir\n{}", usage()))?;
-                        data_dir = Some(value.clone());
-                    }
-                    "--account-id" => {
-                        index += 1;
-                        let value = args.get(index).ok_or_else(|| format!("missing value for --account-id\n{}", usage()))?;
-                        account_id = Some(value.clone());
-                    }
-                    "--help" | "-h" => return Err("usage: magiclaw wechat login [--data-dir <dir>] [--account-id <id>]".into()),
-                    other => return Err(format!("unknown flag: {}\n{}", other, usage())),
-                }
-                index += 1;
-            }
-            Ok(WechatCommand::Login(WechatLoginCommand {
-                data_dir,
-                account_id,
-            }))
-        }
-        _ => Err(format!("usage: magiclaw wechat (login)\n{}", usage())),
-    }
 }
 
 /// Open the SQLite pool used by the binding/push CLI, creating the parent dir.
@@ -801,6 +408,7 @@ fn validate_feishu_config(cfg: &magiclaw::infrastructure::config::FeishuConfig) 
     Ok(())
 }
 
+#[allow(clippy::field_reassign_with_default)]
 fn load_runtime_config() -> AppConfig {
     let mut config = AppConfig::default();
     config.db_path = resolve_db_path();
@@ -936,50 +544,6 @@ fn load_runtime_config() -> AppConfig {
     }
 
     config
-}
-
-/// Process-global singleton guard for long-running modes (daemon/mcp).
-///
-/// We lock a file under the DB directory so another process cannot start
-/// another resident runtime against the same workspace state.
-struct SingletonGuard {
-    _lock_file: std::fs::File,
-}
-
-fn acquire_singleton(mode: &str, config: &AppConfig) -> Result<SingletonGuard, Box<dyn std::error::Error>> {
-    let db_path = PathBuf::from(&config.db_path);
-    let lock_dir = db_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    fs::create_dir_all(&lock_dir)?;
-    let lock_path = lock_dir.join("magiclaw.instance.lock");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
-
-    if let Err(e) = file.try_lock_exclusive() {
-        return Err(format!(
-            "{} mode refused: another magiclaw instance is already running (lock: {}) ({})",
-            mode,
-            lock_path.display(),
-            e
-        )
-        .into());
-    }
-
-    // Best-effort metadata for debugging stale locks / owner PID.
-    use std::io::Write;
-    file.set_len(0)?;
-    writeln!(file, "pid={}", std::process::id())?;
-    writeln!(file, "mode={}", mode)?;
-    writeln!(file, "cwd={}", std::env::current_dir()?.display())?;
-
-    Ok(SingletonGuard { _lock_file: file })
 }
 
 /// Attempt to deliver a message through the locally-running magiclaw daemon's HTTP API.
@@ -1324,7 +888,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match parse_cli_args(&args) {
         Ok(CliCommand::Daemon) => {
             let config = load_runtime_config();
-            let _singleton = acquire_singleton("daemon", &config)?;
+            let _singleton = singleton::acquire_singleton("daemon", &config)?;
             let runtime = AppRuntime::new(config.clone())?;
             runtime.start_background().await?;
 
@@ -1343,7 +907,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(CliCommand::Mcp) => {
             let config = load_runtime_config();
-            let _singleton = acquire_singleton("mcp", &config)?;
+            let _singleton = singleton::acquire_singleton("mcp", &config)?;
             let runtime = AppRuntime::new(config.clone())?;
             runtime.start_background().await?;
 
