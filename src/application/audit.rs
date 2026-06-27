@@ -42,7 +42,6 @@ pub fn write_audit_via_sink(
 
 /// Audit write via raw DbPool — kept for callers not yet wired up to the
 /// `AuditSink` port. New code should prefer `write_audit_via_sink`.
-#[deprecated(note = "use write_audit_via_sink with an AuditSink port")]
 pub fn write_audit(
     db: &DbPool,
     route_key: Option<&str>,

@@ -44,7 +44,6 @@ pub fn list_user_agents_via_port(
 // Legacy DbPool-based entry points: kept for callers not yet wired up to the
 // port. New code should prefer the port-based functions.
 
-#[deprecated(note = "use get_user_agent_via_port with a UserPreferenceStore port")]
 pub fn get_user_agent(
     db: &DbPool,
     channel: &str,
@@ -65,7 +64,6 @@ pub fn get_user_agent(
     })
 }
 
-#[deprecated(note = "use set_user_agent_via_port with a UserPreferenceStore port")]
 pub fn set_user_agent(
     db: &DbPool,
     channel: &str,
@@ -89,7 +87,6 @@ pub fn set_user_agent(
     })
 }
 
-#[deprecated(note = "use list_user_agents_via_port with a UserPreferenceStore port")]
 pub fn list_user_agents(
     db: &DbPool,
     channel: Option<&str>,

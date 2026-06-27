@@ -8,7 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[allow(deprecated)] // port-based migration pending for push.rs
 use crate::application::audit::write_audit;
 use crate::application::binding::{DeliveryTarget, ImportSummary};
 use crate::domain::entities::message::MessageContent;
@@ -61,7 +60,6 @@ fn validate_mode(mode: &str) -> Result<(), String> {
 }
 
 /// Create a push job and insert its items (status `pending`).
-#[allow(deprecated)] // TODO: port-based migration in follow-up
 pub fn import_pushes(db: &DbPool, source_format: &str, path: &str, records: &[PushImportRecord]) -> Result<(String, ImportSummary), String> {
     let job_id = new_id("job");
     let ts = now_ts();
@@ -350,7 +348,6 @@ fn resolve_item_targets(db: &DbPool, item: &PendingItem) -> Result<Vec<DeliveryT
 }
 
 /// Run a push job: resolve each pending item's targets and enqueue outbox rows.
-#[allow(deprecated)] // TODO: port-based migration in follow-up
 pub fn run_push_job(db: &DbPool, job_id: &str) -> Result<RunSummary, String> {
     // Mark job running.
     {
