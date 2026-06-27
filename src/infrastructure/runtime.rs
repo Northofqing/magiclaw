@@ -55,7 +55,9 @@ use crate::channels::wechat::ilink::{
 use crate::domain::entities::message::MessageContent;
 use crate::domain::ports::conversation_queue::ConversationQueue;
 use crate::domain::ports::conversation_state_repo::ConversationStateRepo;
+use crate::domain::ports::dead_letter_repo::DeadLetterRepo;
 use crate::domain::ports::inbox_repo::RepoError;
+use crate::domain::ports::outbox_repo::OutboxRepo;
 use crate::domain::ports::audit_sink::AuditSink;
 use crate::domain::ports::context_token_store::ContextTokenStore;
 use crate::domain::ports::sync_buf_store::SyncBufStore;
@@ -104,7 +106,8 @@ pub struct AppRuntime {
     sync_buf_store: Arc<SqliteSyncBufStore>,
     pub audit_sink: Arc<SqliteAuditSink>,
     conversation_state_repo: Arc<SqliteConversationStateRepo>,
-    send_gate: Arc<ResilienceGate>,
+    pub send_gate: Arc<ResilienceGate>,
+    pub ai_gate: Arc<ResilienceGate>,
     db_pool: DbPool,
     /// Supervised background tasks (GC janitor, inbound router, outbox worker,
     /// wechat token poller, HTTP API). Panics are observable instead of
@@ -362,6 +365,7 @@ impl AppRuntime {
             send_gate,
             db_pool: db_pool.clone(),
             task_supervisor: Arc::new(TaskSupervisor::new()),
+            ai_gate: ai_gate.clone(),
         })
     }
 
@@ -574,6 +578,10 @@ impl AppRuntime {
             logger: Arc<DailyLogger>,
             audit_sink: Arc<SqliteAuditSink>,
             task_supervisor: Arc<TaskSupervisor>,
+            send_gate: Arc<ResilienceGate>,
+            outbox_repo: Arc<SqliteOutboxRepo>,
+            dead_letter_repo: Arc<SqliteDeadLetterRepo>,
+            ai_gate: Arc<ResilienceGate>,
         }
 
         #[derive(Clone, Deserialize)]
@@ -718,6 +726,10 @@ impl AppRuntime {
             logger,
             audit_sink: self.audit_sink.clone(),
             task_supervisor: self.task_supervisor.clone(),
+            send_gate: self.send_gate.clone(),
+            outbox_repo: self.outbox_repo.clone(),
+            dead_letter_repo: self.dead_letter_repo.clone(),
+            ai_gate: self.ai_gate.clone(),
         });
 
         // Start a background long-poll loop to keep context_token hot in memory.
@@ -1228,12 +1240,56 @@ impl AppRuntime {
                         })).collect::<Vec<_>>()
                     });
 
+                    // Resilience stats: circuit breaker + bulkhead for both
+                    // AI and send gates. Lets operators detect when a gate is
+                    // saturated (high active_count) or open (high failure_count).
+                    let send_state = state.send_gate.circuit_state();
+                    let ai_state = state.ai_gate.circuit_state();
+                    let send_gate_info = serde_json::json!({
+                        "circuit_state": match send_state {
+                            crate::core::resilience::circuit_breaker::CircuitState::Closed => "closed",
+                            crate::core::resilience::circuit_breaker::CircuitState::Open => "open",
+                            crate::core::resilience::circuit_breaker::CircuitState::HalfOpen => "half_open",
+                        },
+                        "failure_count": state.send_gate.failure_count(),
+                        "failure_threshold": state.send_gate.failure_threshold(),
+                        "active": state.send_gate.active_count(),
+                        "max_concurrent": state.send_gate.max_concurrent(),
+                    });
+                    let ai_gate_info = serde_json::json!({
+                        "circuit_state": match ai_state {
+                            crate::core::resilience::circuit_breaker::CircuitState::Closed => "closed",
+                            crate::core::resilience::circuit_breaker::CircuitState::Open => "open",
+                            crate::core::resilience::circuit_breaker::CircuitState::HalfOpen => "half_open",
+                        },
+                        "failure_count": state.ai_gate.failure_count(),
+                        "failure_threshold": state.ai_gate.failure_threshold(),
+                        "active": state.ai_gate.active_count(),
+                        "max_concurrent": state.ai_gate.max_concurrent(),
+                    });
+
+                    // Outbox + DLQ stats. Read cheaply via repo list endpoints.
+                    let pending_count = state.outbox_repo.as_ref().fetch_pending(1024)
+                        .map(|v| v.len())
+                        .unwrap_or_else(|e| { tracing::warn!(error = %e, "outbox stat fetch failed"); 0 });
+                    let dlq_count = state.dead_letter_repo.as_ref().list(1024)
+                        .map(|v| v.len())
+                        .unwrap_or_else(|e| { tracing::warn!(error = %e, "dlq stat fetch failed"); 0 });
+
+                    let resilience = serde_json::json!({
+                        "send_gate": send_gate_info,
+                        "ai_gate": ai_gate_info,
+                        "outbox_pending": pending_count,
+                        "dead_letter_count": dlq_count,
+                    });
+
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
                             "ok": true,
                             "feishu": feishu_detail,
-                            "tasks": tasks
+                            "tasks": tasks,
+                            "resilience": resilience
                         }))
                     )
                 }),

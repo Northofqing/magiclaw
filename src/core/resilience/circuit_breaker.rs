@@ -131,6 +131,20 @@ impl CircuitBreaker {
     pub fn state(&self) -> CircuitState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+
+    /// Current consecutive failure count (atomic load).
+    pub fn failure_count(&self) -> u32 {
+        self.failure_count.load(Ordering::SeqCst)
+    }
+
+    /// Read-only view of the breaker config (failure_threshold etc).
+    pub fn config(&self) -> BreakerConfig {
+        BreakerConfig {
+            failure_threshold: self.config.failure_threshold,
+            timeout: self.config.timeout,
+            half_open_max: self.config.half_open_max,
+        }
+    }
 }
 
 #[cfg(test)]

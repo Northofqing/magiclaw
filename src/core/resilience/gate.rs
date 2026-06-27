@@ -79,6 +79,26 @@ impl ResilienceGate {
     pub fn active_count(&self) -> usize {
         self.bulkhead.active_count()
     }
+
+    /// Maximum concurrent operations allowed by the bulkhead.
+    pub fn max_concurrent(&self) -> usize {
+        self.bulkhead.max_concurrent()
+    }
+
+    /// Whether the circuit is open (rejecting all requests).
+    pub fn is_open(&self) -> bool {
+        matches!(self.breaker.state(), CircuitState::Open)
+    }
+
+    /// Failure count in the breaker.
+    pub fn failure_count(&self) -> u32 {
+        self.breaker.failure_count()
+    }
+
+    /// Configured failure threshold (for health reporting).
+    pub fn failure_threshold(&self) -> u32 {
+        self.breaker.config().failure_threshold
+    }
 }
 
 #[cfg(test)]
