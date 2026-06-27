@@ -9,3 +9,4 @@ pub mod inbox_repo;
 pub mod media;
 pub mod outbox_repo;
 pub mod sync_buf_store;
+pub mod user_preference_store;

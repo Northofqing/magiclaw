@@ -14,22 +14,25 @@ use magiclaw::domain::entities::message::{Direction, Message, MessageContent};
 use magiclaw::domain::value_objects::ConversationSnapshot;
 use magiclaw::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
 use magiclaw::infrastructure::config::{AppConfig, default_agent_aliases};
-use magiclaw::infrastructure::db::{self, DbPool};
+use magiclaw::adapters::sqlite_user_preference_store::SqliteUserPreferenceStore;
+use magiclaw::domain::ports::user_preference_store::UserPreferenceStore;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_user_agent_preference_closed_loop() {
     // Setup: Create an in-memory database
-    let conn = db::init_db(":memory:")
+    let conn = magiclaw::infrastructure::db::init_db(":memory:")
         .expect("Failed to init DB");
-    let db_pool = DbPool::new(conn);
+    let db_pool = magiclaw::infrastructure::db::DbPool::new(conn);
+    let store: Arc<dyn UserPreferenceStore> = Arc::new(SqliteUserPreferenceStore::new(db_pool.clone()));
 
     // Create config with agent aliases
     let mut config = AppConfig::default();
     config.agent.enable_user_preferences = true;
-    
+
     // Create middleware
-    let middleware = AgentCommandMiddleware::new(db_pool.clone(), config.agent.clone());
+    let middleware = AgentCommandMiddleware::new(store.clone(), config.agent.clone());
 
     // Test 1: User sends "cc" command
     let rk = RouteKey::new(
@@ -65,8 +68,8 @@ async fn test_user_agent_preference_closed_loop() {
     assert!(response.contains("claude_code"), "Response should mention claude_code");
 
     // Verify: Preference was persisted
-    let saved_pref = agent_preferences::get_user_agent(
-        &db_pool,
+    let saved_pref = agent_preferences::get_user_agent_via_port(
+        store.as_ref(),
         "wechat",
         "default",  // account_scope comes from config.wechat.account_id (default: "default")
         "user_456",
@@ -98,8 +101,8 @@ async fn test_user_agent_preference_closed_loop() {
     assert!(result2.ai_response.is_some(), "Should have response");
 
     // Verify: Preference was updated
-    let saved_pref2 = agent_preferences::get_user_agent(
-        &db_pool,
+    let saved_pref2 = agent_preferences::get_user_agent_via_port(
+        store.as_ref(),
         "wechat",
         "default",  // account_scope comes from config.wechat.account_id
         "user_456",
@@ -224,13 +227,14 @@ async fn test_user_agent_preference_closed_loop() {
 #[tokio::test]
 async fn test_user_agent_preference_isolation_by_account() {
     // Verify that preferences are isolated by account_scope
-    let conn = db::init_db(":memory:")
+    let conn = magiclaw::infrastructure::db::init_db(":memory:")
         .expect("Failed to init DB");
-    let db_pool = DbPool::new(conn);
+    let db_pool = magiclaw::infrastructure::db::DbPool::new(conn);
+    let store: Arc<dyn UserPreferenceStore> = Arc::new(SqliteUserPreferenceStore::new(db_pool.clone()));
 
     let mut config = AppConfig::default();
     config.agent.enable_user_preferences = true;
-    let middleware = AgentCommandMiddleware::new(db_pool.clone(), config.agent.clone());
+    let middleware = AgentCommandMiddleware::new(store.clone(), config.agent.clone());
 
     // User 1 on WeChat account "account1"
     let ctx1 = PipelineContext {
@@ -309,16 +313,16 @@ async fn test_user_agent_preference_isolation_by_account() {
     middleware.process(ctx2).await.expect("Middleware failed");
 
     // Verify: Preferences are isolated by channel
-    let pref_wechat = agent_preferences::get_user_agent(
-        &db_pool,
+    let pref_wechat = agent_preferences::get_user_agent_via_port(
+        store.as_ref(),
         "wechat",
         "default",  // account_scope comes from config.wechat.account_id
         "user_123",
     )
     .expect("DB query failed");
     
-    let pref_dingtalk = agent_preferences::get_user_agent(
-        &db_pool,
+    let pref_dingtalk = agent_preferences::get_user_agent_via_port(
+        store.as_ref(),
         "dingtalk",
         "default",  // account_scope comes from config.wechat.account_id
         "user_123",

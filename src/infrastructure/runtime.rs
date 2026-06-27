@@ -297,7 +297,9 @@ impl AppRuntime {
         // and process agent switching commands before any other pipeline stages.
         let mut pipeline = Pipeline::new()
             .with(Box::new(AgentCommandMiddleware::new(
-                db_pool.clone(),
+                Arc::new(crate::adapters::sqlite_user_preference_store::SqliteUserPreferenceStore::new(
+                    db_pool.clone(),
+                )),
                 config.agent.clone(),
             )))
             .with(Box::new(Normalize))

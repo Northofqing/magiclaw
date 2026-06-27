@@ -1,4 +1,5 @@
 /// User agent preference management.
+use crate::domain::ports::user_preference_store::UserPreferenceStore;
 use crate::infrastructure::db::DbPool;
 use rusqlite::OptionalExtension;
 
@@ -10,7 +11,40 @@ pub struct UserAgentPreferences {
     pub agent_name: String,
 }
 
-/// Get the current agent preference for a user, or None if not set.
+// Port-based entry points (preferred): take a `&dyn UserPreferenceStore`
+// instead of a raw `DbPool`. The application layer no longer needs to know
+// about the storage technology.
+
+pub fn get_user_agent_via_port(
+    store: &dyn UserPreferenceStore,
+    channel: &str,
+    account_scope: &str,
+    peer_id: &str,
+) -> Result<Option<String>, String> {
+    store.get(channel, account_scope, peer_id)
+}
+
+pub fn set_user_agent_via_port(
+    store: &dyn UserPreferenceStore,
+    channel: &str,
+    account_scope: &str,
+    peer_id: &str,
+    agent_name: &str,
+) -> Result<(), String> {
+    store.set(channel, account_scope, peer_id, agent_name)
+}
+
+pub fn list_user_agents_via_port(
+    store: &dyn UserPreferenceStore,
+    channel: Option<&str>,
+) -> Result<Vec<UserAgentPreferences>, String> {
+    store.list(channel)
+}
+
+// Legacy DbPool-based entry points: kept for callers not yet wired up to the
+// port. New code should prefer the port-based functions.
+
+#[deprecated(note = "use get_user_agent_via_port with a UserPreferenceStore port")]
 pub fn get_user_agent(
     db: &DbPool,
     channel: &str,
@@ -19,7 +53,7 @@ pub fn get_user_agent(
 ) -> Result<Option<String>, String> {
     db.query(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT agent_name FROM user_agent_preferences 
+            "SELECT agent_name FROM user_agent_preferences
              WHERE channel = ?1 AND account_scope = ?2 AND peer_id = ?3",
         )?;
         let result = stmt
@@ -31,7 +65,7 @@ pub fn get_user_agent(
     })
 }
 
-/// Set the agent preference for a user.
+#[deprecated(note = "use set_user_agent_via_port with a UserPreferenceStore port")]
 pub fn set_user_agent(
     db: &DbPool,
     channel: &str,
@@ -46,8 +80,8 @@ pub fn set_user_agent(
 
     db.execute(|conn| {
         conn.execute(
-            "INSERT OR REPLACE INTO user_agent_preferences 
-             (channel, account_scope, peer_id, agent_name, updated_at) 
+            "INSERT OR REPLACE INTO user_agent_preferences
+             (channel, account_scope, peer_id, agent_name, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![channel, account_scope, peer_id, agent_name, now],
         )?;
@@ -55,7 +89,7 @@ pub fn set_user_agent(
     })
 }
 
-/// Get all agent preferences (for admin/debugging).
+#[deprecated(note = "use list_user_agents_via_port with a UserPreferenceStore port")]
 pub fn list_user_agents(
     db: &DbPool,
     channel: Option<&str>,
@@ -97,71 +131,85 @@ pub fn list_user_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite_user_preference_store::SqliteUserPreferenceStore;
+    use crate::domain::ports::user_preference_store::InMemoryPreferenceStore;
+    use crate::infrastructure::db::init_db;
 
-    #[test]
-    fn test_set_and_get_user_agent() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
-
-        // Initially no preference
-        let agent = get_user_agent(&db, "wechat", "account1", "user1").unwrap();
-        assert!(agent.is_none());
-
-        // Set preference
-        set_user_agent(&db, "wechat", "account1", "user1", "claude_code").unwrap();
-
-        // Get preference
-        let agent = get_user_agent(&db, "wechat", "account1", "user1").unwrap();
-        assert_eq!(agent, Some("claude_code".to_string()));
-
-        // Override preference
-        set_user_agent(&db, "wechat", "account1", "user1", "codex").unwrap();
-        let agent = get_user_agent(&db, "wechat", "account1", "user1").unwrap();
-        assert_eq!(agent, Some("codex".to_string()));
-
-        // Different user, different preference
-        set_user_agent(&db, "wechat", "account1", "user2", "hermes").unwrap();
-        let agent = get_user_agent(&db, "wechat", "account1", "user2").unwrap();
-        assert_eq!(agent, Some("hermes".to_string()));
-
-        // Original user still has old preference
-        let agent = get_user_agent(&db, "wechat", "account1", "user1").unwrap();
-        assert_eq!(agent, Some("codex".to_string()));
+    fn make_pool() -> DbPool {
+        DbPool::new(init_db(":memory:").unwrap())
     }
 
     #[test]
-    fn test_user_agent_isolation_by_account() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
+    fn test_set_and_get_user_agent_via_port() {
+        let store = SqliteUserPreferenceStore::new(make_pool());
 
-        // Same user, different account
-        set_user_agent(&db, "wechat", "account1", "user1", "claude_code").unwrap();
-        set_user_agent(&db, "wechat", "account2", "user1", "codex").unwrap();
+        assert!(get_user_agent_via_port(&store, "wechat", "account1", "user1")
+            .unwrap()
+            .is_none());
 
-        let agent1 = get_user_agent(&db, "wechat", "account1", "user1").unwrap();
-        let agent2 = get_user_agent(&db, "wechat", "account2", "user1").unwrap();
+        set_user_agent_via_port(&store, "wechat", "account1", "user1", "claude_code").unwrap();
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "account1", "user1").unwrap(),
+            Some("claude_code".into())
+        );
 
-        assert_eq!(agent1, Some("claude_code".to_string()));
-        assert_eq!(agent2, Some("codex".to_string()));
+        // Override
+        set_user_agent_via_port(&store, "wechat", "account1", "user1", "codex").unwrap();
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "account1", "user1").unwrap(),
+            Some("codex".into())
+        );
+
+        // Per-user isolation
+        set_user_agent_via_port(&store, "wechat", "account1", "user2", "hermes").unwrap();
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "account1", "user2").unwrap(),
+            Some("hermes".into())
+        );
+        // user1 unchanged
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "account1", "user1").unwrap(),
+            Some("codex".into())
+        );
     }
 
     #[test]
-    fn test_list_user_agents() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
+    fn test_user_agent_isolation_by_account_via_port() {
+        let store = SqliteUserPreferenceStore::new(make_pool());
 
-        set_user_agent(&db, "wechat", "account1", "user1", "claude_code").unwrap();
-        set_user_agent(&db, "wechat", "account1", "user2", "codex").unwrap();
-        set_user_agent(&db, "dingtalk", "account1", "user1", "hermes").unwrap();
+        set_user_agent_via_port(&store, "wechat", "account1", "user1", "claude_code").unwrap();
+        set_user_agent_via_port(&store, "wechat", "account2", "user1", "codex").unwrap();
 
-        // List all
-        let all = list_user_agents(&db, None).unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "account1", "user1").unwrap(),
+            Some("claude_code".into())
+        );
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "account2", "user1").unwrap(),
+            Some("codex".into())
+        );
+    }
 
-        // List by channel
-        let wechat = list_user_agents(&db, Some("wechat")).unwrap();
-        assert_eq!(wechat.len(), 2);
-        let dingtalk = list_user_agents(&db, Some("dingtalk")).unwrap();
-        assert_eq!(dingtalk.len(), 1);
+    #[test]
+    fn test_list_user_agents_via_port() {
+        let store = SqliteUserPreferenceStore::new(make_pool());
+
+        set_user_agent_via_port(&store, "wechat", "account1", "user1", "claude_code").unwrap();
+        set_user_agent_via_port(&store, "wechat", "account1", "user2", "codex").unwrap();
+        set_user_agent_via_port(&store, "dingtalk", "account1", "user1", "hermes").unwrap();
+
+        assert_eq!(list_user_agents_via_port(&store, None).unwrap().len(), 3);
+        assert_eq!(list_user_agents_via_port(&store, Some("wechat")).unwrap().len(), 2);
+        assert_eq!(list_user_agents_via_port(&store, Some("dingtalk")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_in_memory_store_roundtrip() {
+        let store = InMemoryPreferenceStore::new();
+        set_user_agent_via_port(&store, "wechat", "a", "u1", "claude_code").unwrap();
+        assert_eq!(
+            get_user_agent_via_port(&store, "wechat", "a", "u1").unwrap(),
+            Some("claude_code".into())
+        );
     }
 }

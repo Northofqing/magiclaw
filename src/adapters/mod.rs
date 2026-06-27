@@ -11,3 +11,4 @@ pub mod sqlite_dead_letter;
 pub mod sqlite_inbox;
 pub mod sqlite_outbox;
 pub mod sqlite_sync_buf;
+pub mod sqlite_user_preference_store;

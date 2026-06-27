@@ -1,11 +1,12 @@
 /// Middleware for handling user agent preference switching via commands.
 use async_trait::async_trait;
+use std::sync::Arc;
 use crate::domain::error::PipelineError;
 
 use crate::application::agent_preferences;
 use crate::domain::entities::message::MessageContent;
+use crate::domain::ports::user_preference_store::UserPreferenceStore;
 use crate::infrastructure::config::{default_agent_aliases, AgentConfig};
-use crate::infrastructure::db::DbPool;
 
 use super::agent_command::AgentCommandParser;
 use super::middleware::{Middleware, PipelineContext};
@@ -13,13 +14,13 @@ use super::middleware::{Middleware, PipelineContext};
 /// AgentCommand middleware: intercepts and handles agent switching commands.
 /// This runs early in the pipeline before any message processing.
 pub struct AgentCommandMiddleware {
-    db: DbPool,
+    store: Arc<dyn UserPreferenceStore>,
     parser: AgentCommandParser,
     config: AgentConfig,
 }
 
 impl AgentCommandMiddleware {
-    pub fn new(db: DbPool, config: AgentConfig) -> Self {
+    pub fn new(store: Arc<dyn UserPreferenceStore>, config: AgentConfig) -> Self {
         // Guardrail: if aliases are empty (misconfig), fall back to defaults
         // so `cc/cx/oc/h` still work in production.
         let aliases = if config.aliases.is_empty() {
@@ -33,7 +34,7 @@ impl AgentCommandMiddleware {
             alias_agent_count = parser.aliases.len(),
             "agent command middleware initialized"
         );
-        Self { db, parser, config }
+        Self { store, parser, config }
     }
 }
 
@@ -63,7 +64,7 @@ impl Middleware for AgentCommandMiddleware {
         match command {
             AgentCommand::Switch(agent_name) => {
                 // Save the preference
-                agent_preferences::set_user_agent(&self.db, channel, account_scope, peer_id, &agent_name)?;
+                agent_preferences::set_user_agent_via_port(self.store.as_ref(), channel, account_scope, peer_id, &agent_name)?;
 
                 tracing::info!(
                     peer_id = peer_id,
@@ -79,7 +80,7 @@ impl Middleware for AgentCommandMiddleware {
 
             AgentCommand::Query => {
                 // Get current preference and respond
-                match agent_preferences::get_user_agent(&self.db, channel, account_scope, peer_id)? {
+                match agent_preferences::get_user_agent_via_port(self.store.as_ref(), channel, account_scope, peer_id)? {
                     Some(agent_name) => {
                         ctx.ai_response = Some(format!("当前使用 {}", agent_name));
                     }
@@ -95,7 +96,7 @@ impl Middleware for AgentCommandMiddleware {
 
             AgentCommand::SwitchAndProcess(agent_name, new_text) => {
                 // Save the preference
-                agent_preferences::set_user_agent(&self.db, channel, account_scope, peer_id, &agent_name)?;
+                agent_preferences::set_user_agent_via_port(self.store.as_ref(), channel, account_scope, peer_id, &agent_name)?;
 
                 tracing::info!(
                     peer_id = peer_id,
@@ -116,7 +117,7 @@ impl Middleware for AgentCommandMiddleware {
                     return Ok(ctx);
                 }
 
-                match agent_preferences::get_user_agent(&self.db, channel, account_scope, peer_id)? {
+                match agent_preferences::get_user_agent_via_port(self.store.as_ref(), channel, account_scope, peer_id)? {
                     Some(agent_name) => {
                         // User has a preference, use it
                         ctx.user_agent_selection = Some(agent_name);
@@ -141,238 +142,124 @@ impl Middleware for AgentCommandMiddleware {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::sqlite_user_preference_store::SqliteUserPreferenceStore;
     use crate::domain::entities::message::{Direction, Message};
     use crate::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
     use crate::infrastructure::config::AppConfig;
+    use crate::infrastructure::db::{init_db, DbPool};
     use std::collections::HashMap;
+    use std::sync::Arc;
 
-    fn make_test_mw(db: DbPool) -> AgentCommandMiddleware {
+    fn make_store() -> Arc<dyn UserPreferenceStore> {
+        Arc::new(SqliteUserPreferenceStore::new(DbPool::new(
+            init_db(":memory:").unwrap(),
+        )))
+    }
+
+    fn make_test_mw(store: Arc<dyn UserPreferenceStore>) -> AgentCommandMiddleware {
         let mut aliases = HashMap::new();
-        aliases.insert(
-            "claude_code".to_string(),
-            vec!["cc".to_string(), "claude".to_string()],
-        );
-        aliases.insert(
-            "codex".to_string(),
-            vec!["cx".to_string(), "codex".to_string()],
-        );
+        aliases.insert("claude_code".to_string(), vec!["cc".to_string(), "claude".to_string()]);
+        aliases.insert("codex".to_string(), vec!["cx".to_string(), "codex".to_string()]);
+        aliases.insert("openclaw".to_string(), vec!["oc".to_string(), "openclaw".to_string()]);
+        aliases.insert("hermes".to_string(), vec!["h".to_string(), "hermes".to_string()]);
+        let config = AgentConfig { enable_user_preferences: true, aliases };
+        AgentCommandMiddleware::new(store, config)
+    }
 
-        let config = AgentConfig {
-            enable_user_preferences: true,
-            aliases,
-        };
-
-        AgentCommandMiddleware::new(db, config)
+    fn snapshot(rk: &RouteKey) -> crate::domain::value_objects::ConversationSnapshot {
+        crate::domain::value_objects::ConversationSnapshot {
+            route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(),
+            conversation_type: ConversationType::Direct,
+            message_count: 0, participants: vec![], last_active_secs: 0,
+        }
     }
 
     #[tokio::test]
     async fn test_parse_switch_command() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
-        let mw = make_test_mw(db.clone());
-
-        let rk = RouteKey::new(
-            ChannelId::new("wechat"),
-            "conv1",
-            "user1",
-            ConversationType::Direct,
-        );
-        let msg = Message {
-            id: "m1".into(),
-            route_key: rk.clone(),
-            sequence: None,
-            timestamp_ms: 1000,
-            direction: Direction::Inbound,
-            content: MessageContent::Text("cc".into()),
-            audit_mark: None,
-        };
-
+        let store = make_store();
+        let store_verify = store.clone();
+        let mw = make_test_mw(store);
+        let rk = RouteKey::new(ChannelId::new("wechat"), "conv1", "user1", ConversationType::Direct);
         let ctx = PipelineContext {
-            message: msg,
-            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, message_count: 0, participants: vec![], last_active_secs: 0 },
-            config: AppConfig::default(),
-            ai_response: None,
-            short_circuit: false,
-            user_agent_selection: None,
+            message: Message { id: "m1".into(), route_key: rk.clone(), sequence: None, timestamp_ms: 1000, direction: Direction::Inbound, content: MessageContent::Text("cc".into()), audit_mark: None },
+            conversation: snapshot(&rk), config: AppConfig::default(),
+            ai_response: None, short_circuit: false, user_agent_selection: None,
         };
-
         let result = mw.process(ctx).await.unwrap();
         assert!(result.short_circuit);
-        assert!(result.ai_response.is_some());
         assert!(result.ai_response.as_ref().unwrap().contains("claude_code"));
-
-        // Verify preference was saved
-        let saved = agent_preferences::get_user_agent(&db, "wechat", "default", "user1")
-            .unwrap();
+        let saved = agent_preferences::get_user_agent_via_port(store_verify.as_ref(), "wechat", "default", "user1").unwrap();
         assert_eq!(saved, Some("claude_code".to_string()));
     }
 
     #[tokio::test]
     async fn test_query_command_no_preference() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
-        let mw = make_test_mw(db);
-
-        let rk = RouteKey::new(
-            ChannelId::new("wechat"),
-            "conv1",
-            "user1",
-            ConversationType::Direct,
-        );
-        let msg = Message {
-            id: "m1".into(),
-            route_key: rk.clone(),
-            sequence: None,
-            timestamp_ms: 1000,
-            direction: Direction::Inbound,
-            content: MessageContent::Text("/agent".into()),
-            audit_mark: None,
-        };
-
+        let mw = make_test_mw(make_store());
+        let rk = RouteKey::new(ChannelId::new("wechat"), "conv1", "user1", ConversationType::Direct);
         let ctx = PipelineContext {
-            message: msg,
-            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, message_count: 0, participants: vec![], last_active_secs: 0 },
-            config: AppConfig::default(),
-            ai_response: None,
-            short_circuit: false,
-            user_agent_selection: None,
+            message: Message { id: "m1".into(), route_key: rk.clone(), sequence: None, timestamp_ms: 1000, direction: Direction::Inbound, content: MessageContent::Text("/agent".into()), audit_mark: None },
+            conversation: snapshot(&rk), config: AppConfig::default(),
+            ai_response: None, short_circuit: false, user_agent_selection: None,
         };
-
         let result = mw.process(ctx).await.unwrap();
         assert!(result.short_circuit);
-        assert!(result
-            .ai_response
-            .as_ref()
-            .unwrap()
-            .contains("还未选择"));
+        assert!(result.ai_response.as_ref().unwrap().contains("未选择"));
     }
 
     #[tokio::test]
     async fn test_regular_message_no_preference() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
-        let mw = make_test_mw(db);
-
-        let rk = RouteKey::new(
-            ChannelId::new("wechat"),
-            "conv1",
-            "user1",
-            ConversationType::Direct,
-        );
-        let msg = Message {
-            id: "m1".into(),
-            route_key: rk.clone(),
-            sequence: None,
-            timestamp_ms: 1000,
-            direction: Direction::Inbound,
-            content: MessageContent::Text("hello".into()),
-            audit_mark: None,
-        };
-
+        let mw = make_test_mw(make_store());
+        let rk = RouteKey::new(ChannelId::new("wechat"), "conv1", "user1", ConversationType::Direct);
         let ctx = PipelineContext {
-            message: msg,
-            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, message_count: 0, participants: vec![], last_active_secs: 0 },
-            config: AppConfig::default(),
-            ai_response: None,
-            short_circuit: false,
-            user_agent_selection: None,
+            message: Message { id: "m1".into(), route_key: rk.clone(), sequence: None, timestamp_ms: 1000, direction: Direction::Inbound, content: MessageContent::Text("hello".into()), audit_mark: None },
+            conversation: snapshot(&rk), config: AppConfig::default(),
+            ai_response: None, short_circuit: false, user_agent_selection: None,
         };
-
         let result = mw.process(ctx).await.unwrap();
-        assert!(result.short_circuit); // Should prompt for agent selection
-        assert!(result.ai_response.is_some());
+        assert!(result.short_circuit);
         assert!(result.ai_response.as_ref().unwrap().contains("请先选择"));
     }
 
     #[tokio::test]
     async fn test_regular_message_with_preference() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
-
-        // Set a preference first
-        agent_preferences::set_user_agent(&db, "wechat", "default", "user1", "claude_code").unwrap();
-
-        let mw = make_test_mw(db);
-
-        let rk = RouteKey::new(
-            ChannelId::new("wechat"),
-            "conv1",
-            "user1",
-            ConversationType::Direct,
-        );
-        let msg = Message {
-            id: "m1".into(),
-            route_key: rk.clone(),
-            sequence: None,
-            timestamp_ms: 1000,
-            direction: Direction::Inbound,
-            content: MessageContent::Text("hello".into()),
-            audit_mark: None,
-        };
-
+        let store = make_store();
+        agent_preferences::set_user_agent_via_port(store.as_ref(), "wechat", "default", "user1", "claude_code").unwrap();
+        let mw = make_test_mw(store);
+        let rk = RouteKey::new(ChannelId::new("wechat"), "conv1", "user1", ConversationType::Direct);
         let ctx = PipelineContext {
-            message: msg,
-            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, message_count: 0, participants: vec![], last_active_secs: 0 },
-            config: AppConfig::default(),
-            ai_response: None,
-            short_circuit: false,
-            user_agent_selection: None,
+            message: Message { id: "m1".into(), route_key: rk.clone(), sequence: None, timestamp_ms: 1000, direction: Direction::Inbound, content: MessageContent::Text("hello".into()), audit_mark: None },
+            conversation: snapshot(&rk), config: AppConfig::default(),
+            ai_response: None, short_circuit: false, user_agent_selection: None,
         };
-
         let result = mw.process(ctx).await.unwrap();
-        assert!(!result.short_circuit); // Should continue to next middleware
-        assert!(result.user_agent_selection.is_some());
+        assert!(!result.short_circuit);
         assert_eq!(result.user_agent_selection.as_ref().unwrap(), "claude_code");
     }
 
     #[tokio::test]
     async fn test_switch_and_process() {
-        let conn = crate::infrastructure::db::init_db(":memory:").unwrap();
-        let db = DbPool::new(conn);
-        let mw = make_test_mw(db.clone());
-
-        let rk = RouteKey::new(
-            ChannelId::new("wechat"),
-            "conv1",
-            "user1",
-            ConversationType::Direct,
-        );
-        let msg = Message {
-            id: "m1".into(),
-            route_key: rk.clone(),
-            sequence: None,
-            timestamp_ms: 1000,
-            direction: Direction::Inbound,
-            content: MessageContent::Text("cc 帮我总结一下".into()),
-            audit_mark: None,
-        };
-
+        let store = make_store();
+        let store_verify = store.clone();
+        let mw = make_test_mw(store);
+        let rk = RouteKey::new(ChannelId::new("wechat"), "conv1", "user1", ConversationType::Direct);
         let ctx = PipelineContext {
-            message: msg,
-            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, message_count: 0, participants: vec![], last_active_secs: 0 },
-            config: AppConfig::default(),
-            ai_response: None,
-            short_circuit: false,
-            user_agent_selection: None,
+            message: Message { id: "m1".into(), route_key: rk.clone(), sequence: None, timestamp_ms: 1000, direction: Direction::Inbound, content: MessageContent::Text("cc 帮我总结一下".into()), audit_mark: None },
+            conversation: snapshot(&rk), config: AppConfig::default(),
+            ai_response: None, short_circuit: false, user_agent_selection: None,
         };
-
         let result = mw.process(ctx).await.unwrap();
-        assert!(!result.short_circuit); // Should continue to process
+        assert!(!result.short_circuit);
         assert_eq!(result.user_agent_selection.as_ref().unwrap(), "claude_code");
-        
-        // Message content should be updated
         if let MessageContent::Text(t) = &result.message.content {
             assert_eq!(t, "帮我总结一下");
         } else {
             panic!("Expected text content");
         }
-
-        // Preference should be saved
-        let saved =
-            agent_preferences::get_user_agent(&db, "wechat", "default", "user1").unwrap();
+        let saved = agent_preferences::get_user_agent_via_port(store_verify.as_ref(), "wechat", "default", "user1").unwrap();
         assert_eq!(saved, Some("claude_code".to_string()));
     }
 }
