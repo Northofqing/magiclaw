@@ -101,7 +101,7 @@ pub struct AppRuntime {
     pub outbox_repo: Arc<SqliteOutboxRepo>,
     pub dead_letter_repo: Arc<SqliteDeadLetterRepo>,
     pub channel_registry: Arc<ChannelRegistry>,
-    api_client_registry: Arc<ApiClientRegistry>,
+    pub api_client_registry: Arc<ApiClientRegistry>,
     dedup_cache: Arc<MokaDedupCache>,
     sync_buf_store: Arc<SqliteSyncBufStore>,
     pub audit_sink: Arc<SqliteAuditSink>,

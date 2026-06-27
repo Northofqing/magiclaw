@@ -28,3 +28,4 @@ fs2 = "0.4"
 dotenvy = "0.15"
 qrcode = "0.14"
 image = "0.25"
+tower = { version = "0.5", features = ["util"] }
