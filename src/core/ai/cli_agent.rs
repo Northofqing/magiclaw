@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+
+use crate::domain::error::AiError;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -46,7 +48,7 @@ impl AiBackend for CliAgentBackend {
         self.name
     }
 
-    async fn generate(&self, input: &str, _context: Option<&str>) -> Result<String, String> {
+    async fn generate(&self, input: &str, _context: Option<&str>) -> Result<String, AiError> {
         run_cli_agent(&self.config, input).await
     }
 }
@@ -96,7 +98,7 @@ pub fn preset(name: &str) -> Option<CliAgentConfig> {
 
 /// Run a CLI agent with the given config and prompt. Shared by both the generic
 /// [`CliAgentBackend`] and the specialised claude_code backend.
-pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<String, String> {
+pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<String, AiError> {
     let cap = cfg.max_output_bytes;
 
     // Optional reply file for agents that write their final message to disk
@@ -143,7 +145,7 @@ pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<
         Ok(c) => c,
         Err(e) => {
             cleanup_file(&out_file);
-            return Err(format!("failed to spawn agent '{}': {}", cfg.binary_path, e));
+            return Err(AiError::Transport(format!("failed to spawn agent '{}': {}", cfg.binary_path, e)));
         }
     };
 
@@ -151,14 +153,14 @@ pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<
         Some(s) => s,
         None => {
             cleanup_file(&out_file);
-            return Err("no stdout pipe".to_string());
+            return Err(AiError::Internal("no stdout pipe".into()));
         }
     };
     let stderr = match child.stderr.take() {
         Some(s) => s,
         None => {
             cleanup_file(&out_file);
-            return Err("no stderr pipe".to_string());
+            return Err(AiError::Internal("no stderr pipe".into()));
         }
     };
 
@@ -177,10 +179,7 @@ pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<
             let _ = child.start_kill();
             let _ = child.wait().await;
             cleanup_file(&out_file);
-            return Err(format!(
-                "agent '{}' timed out after {}s",
-                cfg.binary_path, cfg.timeout_secs
-            ));
+            return Err(AiError::Timeout(cfg.timeout_secs * 1000));
         }
     };
 
@@ -189,7 +188,7 @@ pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<
         Ok(s) => s,
         Err(e) => {
             cleanup_file(&out_file);
-            return Err(format!("failed to wait for agent: {}", e));
+            return Err(AiError::Transport(format!("failed to wait for agent: {}", e)));
         }
     };
     if !status.success() {
@@ -201,11 +200,14 @@ pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<
             "agent exited with non-zero status"
         );
         cleanup_file(&out_file);
-        return Err(format!(
-            "agent '{}' exited with status {:?}",
-            cfg.binary_path,
-            status.code()
-        ));
+        return Err(AiError::Backend {
+            status: status.code().unwrap_or(0) as u16,
+            body: format!(
+                "agent '{}' exited with status {:?}",
+                cfg.binary_path,
+                status.code()
+            ),
+        });
     }
 
     // Source of the reply: the output file (if requested) or stdout.
@@ -215,10 +217,13 @@ pub(crate) async fn run_cli_agent(cfg: &CliAgentConfig, prompt: &str) -> Result<
         match content {
             Some(c) => c,
             None => {
-                return Err(format!(
-                    "agent '{}' did not write its output file",
-                    cfg.binary_path
-                ))
+                return Err(AiError::Backend {
+                    status: 0,
+                    body: format!(
+                        "agent '{}' did not write its output file",
+                        cfg.binary_path
+                    ),
+                })
             }
         }
     } else {
@@ -413,7 +418,7 @@ mod tests {
         c.timeout_secs = 1;
         let be = CliAgentBackend::new("custom", c);
         let err = be.generate("hi", None).await.unwrap_err();
-        assert!(err.contains("timed out"), "got: {}", err);
+        assert!(err.to_string().contains("timeout"), "got: {}", err);
     }
 
     #[tokio::test]
@@ -423,7 +428,7 @@ mod tests {
             cfg(std::path::PathBuf::from("/nonexistent/agent_xyz"), vec![]),
         );
         let err = be.generate("hi", None).await.unwrap_err();
-        assert!(err.contains("failed to spawn"), "got: {}", err);
+        assert!(err.to_string().contains("failed to spawn"), "got: {}", err);
     }
 
     #[tokio::test]
@@ -431,7 +436,7 @@ mod tests {
         let stub = write_stub("agent_fail", "#!/bin/sh\necho boom 1>&2\nexit 3\n");
         let be = CliAgentBackend::new("custom", cfg(stub, vec![]));
         let err = be.generate("hi", None).await.unwrap_err();
-        assert!(err.contains("status"), "got: {}", err);
+        assert!(err.to_string().contains("status"), "got: {}", err);
     }
 
     #[test]
@@ -447,7 +452,7 @@ mod tests {
     fn extract_reply_flags_is_error() {
         let err = extract_reply(r#"{"is_error":true,"subtype":"auth"}"#, &Some("/result".into()))
             .unwrap_err();
-        assert!(err.contains("auth"));
+        assert!(err.to_string().contains("auth"));
     }
 
     #[test]

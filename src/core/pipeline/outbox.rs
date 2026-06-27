@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::domain::error::PipelineError;
 use std::sync::Arc;
 
 use crate::domain::entities::message::Direction;
@@ -32,7 +33,7 @@ impl Middleware for OutboxStage {
     }
     fn is_terminal(&self) -> bool { true }
 
-    async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, String> {
+    async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         // Only submit when the Formatter produced an outbound reply.
         if ctx.message.direction != Direction::Outbound {
             return Ok(ctx);

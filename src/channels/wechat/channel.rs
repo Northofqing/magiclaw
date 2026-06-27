@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::channels::channel_trait::{Channel, HealthStatus, SendReceipt};
 use crate::domain::entities::message::{Message, MessageContent};
+use crate::domain::error::ChannelError;
 use crate::domain::ports::context_token_store::ContextTokenStore;
 use crate::domain::ports::media::{MediaRef, MediaUploader};
 use crate::domain::ports::sync_buf_store::SyncBufStore;
@@ -133,7 +134,7 @@ impl WeChatChannel {
         to: &str,
         url: &str,
         media_id: Option<&str>,
-    ) -> Result<SendReceipt, String> {
+    ) -> Result<SendReceipt, ChannelError> {
         let Some(uploader) = &self.media_uploader else {
             return Err("wechat media upload not enabled (no uploader configured)".into());
         };
@@ -188,7 +189,7 @@ impl Channel for WeChatChannel {
         self.channel_id.clone()
     }
 
-    async fn start(&self, inbound_tx: mpsc::Sender<Message>) -> Result<(), String> {
+    async fn start(&self, inbound_tx: mpsc::Sender<Message>) -> Result<(), ChannelError> {
         let channel_id = self.channel_id.clone();
         match &self.mode {
             WeChatMode::Stub => tracing::info!("WeChat channel started (skeleton)"),
@@ -350,7 +351,7 @@ impl Channel for WeChatChannel {
         Ok(())
     }
 
-    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, String> {
+    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, ChannelError> {
         let body = match content {
             MessageContent::Text(t) => t.clone(),
             MessageContent::Image { url, media_id } => {
@@ -414,12 +415,12 @@ impl Channel for WeChatChannel {
         }
     }
 
-    async fn stop(&self) -> Result<(), String> {
+    async fn stop(&self) -> Result<(), ChannelError> {
         tracing::info!("WeChat channel stopped");
         Ok(())
     }
 
-    async fn health(&self) -> Result<HealthStatus, String> {
+    async fn health(&self) -> Result<HealthStatus, ChannelError> {
         Ok(HealthStatus {
             channel: "wechat".into(),
             healthy: true,
@@ -464,7 +465,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.contains("not enabled"));
+        assert!(err.to_string().contains("not enabled"));
     }
 
     #[tokio::test]

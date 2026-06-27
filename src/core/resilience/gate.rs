@@ -39,19 +39,24 @@ impl ResilienceGate {
     /// operation). Otherwise acquires a bulkhead permit (waiting if the pool is
     /// saturated, which bounds concurrency), runs the operation, and records the
     /// outcome with the breaker. The permit is released when the call returns.
-    pub async fn execute<T, Fut>(&self, op: Fut) -> Result<T, String>
+    ///
+    /// Generic over the error type `E` so callers can preserve structured error
+    /// variants (e.g. `ChannelError`, `AiError`) without losing type information
+    /// at the resilience boundary.
+    pub async fn execute<T, E, Fut>(&self, op: Fut) -> Result<T, E>
     where
-        Fut: std::future::Future<Output = Result<T, String>>,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: From<String>,
     {
         if !self.breaker.allow_request() {
-            return Err("circuit breaker open".to_string());
+            return Err(E::from("circuit breaker open".to_string()));
         }
 
         let _guard = self
             .bulkhead
             .acquire()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| E::from(e.to_string()))?;
 
         match op.await {
             Ok(value) => {

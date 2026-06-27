@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::domain::error::AiError;
+
 use crate::core::resilience::gate::ResilienceGate;
 
 use super::backend::AiBackend;
@@ -30,7 +32,7 @@ impl AiBackend for ResilientAiBackend {
         self.inner.name()
     }
 
-    async fn generate(&self, input: &str, context: Option<&str>) -> Result<String, String> {
+    async fn generate(&self, input: &str, context: Option<&str>) -> Result<String, AiError> {
         self.gate.execute(self.inner.generate(input, context)).await
     }
 }
@@ -51,9 +53,9 @@ mod tests {
         fn name(&self) -> &'static str {
             "counting-fail"
         }
-        async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, String> {
+        async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, AiError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err("backend down".to_string())
+            Err(AiError::Transport("backend down".to_string()))
         }
     }
 

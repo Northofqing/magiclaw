@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use crate::domain::error::PipelineError;
+
 
 use super::middleware::{Middleware, PipelineContext};
 
@@ -24,7 +26,7 @@ impl RateLimit {
 impl Middleware for RateLimit {
     fn name(&self) -> &'static str { "rate_limit" }
 
-    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, String> {
+    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         // Some platforms (e.g. WeChat group inbound) may leave conversation_id empty.
         // Fall back to peer_id to avoid collapsing all traffic into one global bucket.
         let scope = if ctx.message.route_key.conversation_id.is_empty() {

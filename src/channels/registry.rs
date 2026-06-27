@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::channels::channel_trait::{Channel, HealthStatus, SendReceipt};
 use crate::domain::entities::message::{Message, MessageContent};
+use crate::domain::error::ChannelError;
 use crate::domain::value_objects::route_key::ChannelId;
 
 /// Manages multiple channel instances with per-channel isolation.
@@ -68,7 +69,7 @@ impl ChannelRegistry {
                 Err(e) => results.push(HealthStatus {
                     channel: id.to_string(),
                     healthy: false,
-                    detail: e,
+                    detail: e.to_string(),
                 }),
             }
         }
@@ -81,9 +82,9 @@ impl ChannelRegistry {
         channel_id: &ChannelId,
         to: &str,
         content: &MessageContent,
-    ) -> Result<SendReceipt, String> {
+    ) -> Result<SendReceipt, ChannelError> {
         let channel = self.channels.get(channel_id)
-            .ok_or_else(|| format!("channel not found: {}", channel_id))?;
+            .ok_or_else(|| ChannelError::InvalidRecipient(format!("channel not found: {}", channel_id)))?;
         channel.send_message(to, content).await
     }
 
@@ -114,13 +115,13 @@ mod tests {
     #[async_trait]
     impl Channel for StubChannel {
         fn id(&self) -> ChannelId { self.id.clone() }
-        async fn start(&self, _tx: mpsc::Sender<Message>) -> Result<(), String> {
+        async fn start(&self, _tx: mpsc::Sender<Message>) -> Result<(), ChannelError> {
             if self.start_fails { Err("simulated failure".into()) } else { Ok(()) }
         }
-        async fn send_message(&self, _to: &str, _content: &MessageContent) -> Result<SendReceipt, String> {
+        async fn send_message(&self, _to: &str, _content: &MessageContent) -> Result<SendReceipt, ChannelError> {
             Ok(SendReceipt { message_id: "stub".into(), platform_msg_id: None, timestamp_ms: 1 })
         }
-        async fn stop(&self) -> Result<(), String> { Ok(()) }
+        async fn stop(&self) -> Result<(), ChannelError> { Ok(()) }
     }
 
     #[tokio::test]

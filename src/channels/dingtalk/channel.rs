@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::channels::channel_trait::{Channel, HealthStatus, SendReceipt};
 use crate::domain::entities::message::{Message, MessageContent};
+use crate::domain::error::ChannelError;
 use crate::domain::value_objects::route_key::ChannelId;
 
 /// Dingtalk channel skeleton. Full implementation in Phase 4-5.
@@ -26,13 +27,13 @@ impl Channel for DingtalkChannel {
         self.channel_id.clone()
     }
 
-    async fn start(&self, _inbound_tx: mpsc::Sender<Message>) -> Result<(), String> {
+    async fn start(&self, _inbound_tx: mpsc::Sender<Message>) -> Result<(), ChannelError> {
         tracing::info!("Dingtalk channel started (skeleton)");
         // Phase 4: connect to Dingtalk webhook/long-poll
         Ok(())
     }
 
-    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, String> {
+    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, ChannelError> {
         let body = match content {
             MessageContent::Text(t) => t.clone(),
             _ => format!("{:?}", content),
@@ -46,12 +47,12 @@ impl Channel for DingtalkChannel {
         })
     }
 
-    async fn stop(&self) -> Result<(), String> {
+    async fn stop(&self) -> Result<(), ChannelError> {
         tracing::info!("Dingtalk channel stopped");
         Ok(())
     }
 
-    async fn health(&self) -> Result<HealthStatus, String> {
+    async fn health(&self) -> Result<HealthStatus, ChannelError> {
         Ok(HealthStatus {
             channel: "dingtalk".into(),
             healthy: true,

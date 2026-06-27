@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::domain::error::PipelineError;
 
 use crate::domain::entities::message::{Direction, MessageContent};
 
@@ -12,7 +13,7 @@ impl Middleware for Formatter {
     fn name(&self) -> &'static str { "formatter" }
     fn is_terminal(&self) -> bool { true }
 
-    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, String> {
+    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         if let Some(response) = ctx.ai_response.take() {
             let responder = if let Some(agent) = ctx.user_agent_selection.as_deref() {
                 agent

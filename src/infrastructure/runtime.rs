@@ -169,6 +169,7 @@ impl OutboxMessageSender for RegistryOutboxSender {
             .send_via(&route_key.channel, &route_key.peer_id, &payload)
             .await
             .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 

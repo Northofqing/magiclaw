@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use crate::domain::error::AiError;
+
 use super::backend::AiBackend;
 
 /// Claude/Anthropic backend stub. Full implementation requires API key and HTTP client.
@@ -18,7 +20,7 @@ impl ClaudeBackend {
 impl AiBackend for ClaudeBackend {
     fn name(&self) -> &'static str { "claude" }
 
-    async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, String> {
+    async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, AiError> {
         tracing::warn!("Claude backend is a stub — returning echo response");
         Ok("[claude stub] response placeholder".into())
     }

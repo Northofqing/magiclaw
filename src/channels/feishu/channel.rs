@@ -8,6 +8,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::channels::channel_trait::{Channel, HealthStatus, SendReceipt};
 use crate::domain::entities::message::{Message, MessageContent};
+use crate::domain::error::ChannelError;
 use crate::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
 use crate::infrastructure::config::FeishuConfig;
 
@@ -610,7 +611,7 @@ impl Channel for FeishuChannel {
         self.channel_id.clone()
     }
 
-    async fn start(&self, _inbound_tx: mpsc::Sender<Message>) -> Result<(), String> {
+    async fn start(&self, _inbound_tx: mpsc::Sender<Message>) -> Result<(), ChannelError> {
         match self.mode {
             FeishuMode::Stub => tracing::info!("Feishu channel started (skeleton)"),
             FeishuMode::OpenApi { .. } => tracing::info!("Feishu channel started (openapi enabled)"),
@@ -618,7 +619,7 @@ impl Channel for FeishuChannel {
         Ok(())
     }
 
-    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, String> {
+    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, ChannelError> {
         match &self.mode {
             FeishuMode::Stub => {
                 let (msg_type, _) = map_content(content)?;
@@ -728,10 +729,10 @@ impl Channel for FeishuChannel {
                     .map_err(|e| format!("feishu send parse failed: {}", e))?;
 
                 if !status.is_success() || parsed.code != 0 {
-                    return Err(format!(
+                    return Err(ChannelError::ContentRejected(format!(
                         "feishu send rejected: status={} code={} msg={}",
                         status, parsed.code, parsed.msg
-                    ));
+                    )));
                 }
 
                 Ok(SendReceipt {
@@ -747,12 +748,12 @@ impl Channel for FeishuChannel {
         }
     }
 
-    async fn stop(&self) -> Result<(), String> {
+    async fn stop(&self) -> Result<(), ChannelError> {
         tracing::info!("Feishu channel stopped");
         Ok(())
     }
 
-    async fn health(&self) -> Result<HealthStatus, String> {
+    async fn health(&self) -> Result<HealthStatus, ChannelError> {
         Ok(HealthStatus {
             channel: "feishu".into(),
             healthy: true,

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::domain::error::PipelineError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,7 +43,7 @@ impl AiMiddleware {
 impl Middleware for AiMiddleware {
     fn name(&self) -> &'static str { "ai" }
 
-    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, String> {
+    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         let input = match &ctx.message.content {
             MessageContent::Text(t) => t.clone(),
             _ => return Ok(ctx), // skip non-text messages

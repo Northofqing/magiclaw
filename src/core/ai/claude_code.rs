@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use crate::domain::error::AiError;
+
 use super::backend::AiBackend;
 use super::cli_agent::run_cli_agent;
 use crate::infrastructure::config::{ClaudeCodeConfig, CliAgentConfig};
@@ -56,7 +58,7 @@ impl AiBackend for ClaudeCodeBackend {
         "claude_code"
     }
 
-    async fn generate(&self, input: &str, _context: Option<&str>) -> Result<String, String> {
+    async fn generate(&self, input: &str, _context: Option<&str>) -> Result<String, AiError> {
         run_cli_agent(&self.to_cli_config(), input).await
     }
 }
@@ -123,7 +125,7 @@ mod tests {
         c.timeout_secs = 1;
         let be = ClaudeCodeBackend::new(c);
         let err = be.generate("hi", None).await.unwrap_err();
-        assert!(err.contains("timed out"), "got: {}", err);
+        assert!(err.to_string().contains("timeout"), "got: {}", err);
     }
 
     #[tokio::test]
@@ -133,7 +135,7 @@ mod tests {
             vec![],
         ));
         let err = be.generate("hi", None).await.unwrap_err();
-        assert!(err.contains("failed to spawn"), "got: {}", err);
+        assert!(err.to_string().contains("failed to spawn"), "got: {}", err);
     }
 
     #[tokio::test]
@@ -141,6 +143,6 @@ mod tests {
         let stub = write_stub("claude_fail", "#!/bin/sh\necho 'boom' 1>&2\nexit 3\n");
         let be = ClaudeCodeBackend::new(cfg(stub, vec![]));
         let err = be.generate("hi", None).await.unwrap_err();
-        assert!(err.contains("status"), "got: {}", err);
+        assert!(err.to_string().contains("status"), "got: {}", err);
     }
 }

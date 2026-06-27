@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use crate::domain::error::AiError;
+
 use super::backend::AiBackend;
 
 /// OpenAI backend stub. Full implementation requires API key and HTTP client.
@@ -18,7 +20,7 @@ impl OpenAiBackend {
 impl AiBackend for OpenAiBackend {
     fn name(&self) -> &'static str { "openai" }
 
-    async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, String> {
+    async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, AiError> {
         // Stub: in production this calls the OpenAI chat completions API
         tracing::warn!("OpenAI backend is a stub — returning echo response");
         Ok("[openai stub] response placeholder".into())

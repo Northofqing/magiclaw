@@ -1,5 +1,6 @@
 /// Middleware for handling user agent preference switching via commands.
 use async_trait::async_trait;
+use crate::domain::error::PipelineError;
 
 use crate::application::agent_preferences;
 use crate::domain::entities::message::MessageContent;
@@ -40,7 +41,7 @@ impl AgentCommandMiddleware {
 impl Middleware for AgentCommandMiddleware {
     fn name(&self) -> &'static str { "agent_command" }
 
-    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, String> {
+    async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         // Only process text messages
         let text = match &ctx.message.content {
             MessageContent::Text(t) => t,

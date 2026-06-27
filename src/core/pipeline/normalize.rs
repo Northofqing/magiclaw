@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use crate::domain::error::PipelineError;
+
 use super::middleware::{Middleware, PipelineContext};
 
 /// Normalize middleware: standardizes message format across platforms.
@@ -9,7 +11,7 @@ pub struct Normalize;
 impl Middleware for Normalize {
     fn name(&self) -> &'static str { "normalize" }
 
-    async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, String> {
+    async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         // Phase 4: normalize platform-specific fields into common format
         // - strip HTML/rich-text if platform doesn't support it
         // - normalize mentions, emoji, etc.

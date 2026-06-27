@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::domain::entities::message::Message;
+use crate::domain::error::PipelineError;
 use crate::domain::value_objects::ConversationSnapshot;
 use crate::infrastructure::config::AppConfig;
 
@@ -31,7 +32,7 @@ pub trait Middleware: Send + Sync {
     }
 
     /// Process the context. Return Ok(ctx) to continue, or set short_circuit to true.
-    async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, String>;
+    async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, PipelineError>;
 }
 
 /// The pipeline executes a chain of middleware in order.
@@ -49,7 +50,7 @@ impl Pipeline {
         self
     }
 
-    pub async fn run(&self, ctx: PipelineContext) -> Result<PipelineContext, String> {
+    pub async fn run(&self, ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
         let mut ctx = ctx;
         for step in &self.steps {
             if ctx.short_circuit {
@@ -85,7 +86,7 @@ mod tests {
     #[async_trait]
     impl Middleware for TestMw {
         fn name(&self) -> &'static str { self.name }
-        async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, String> {
+        async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, PipelineError> {
             let existing = ctx.ai_response.unwrap_or_default();
             ctx.ai_response = Some(format!("{}{}", existing, self.append));
             Ok(ctx)

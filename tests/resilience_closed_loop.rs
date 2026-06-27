@@ -17,6 +17,7 @@ use magiclaw::adapters::conversation_store::ConversationStore;
 use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
 use magiclaw::core::ai::backend::AiBackend;
 use magiclaw::core::ai::resilient::ResilientAiBackend;
+use magiclaw::domain::error::AiError;
 use magiclaw::core::pipeline::ai::AiMiddleware;
 use magiclaw::core::pipeline::formatter::Formatter;
 use magiclaw::core::pipeline::normalize::Normalize;
@@ -40,9 +41,9 @@ impl AiBackend for CountingFailBackend {
     fn name(&self) -> &'static str {
         "counting-fail"
     }
-    async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, String> {
+    async fn generate(&self, _input: &str, _context: Option<&str>) -> Result<String, AiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err("ai down".to_string())
+        Err(AiError::Transport("ai down".to_string()))
     }
 }
 

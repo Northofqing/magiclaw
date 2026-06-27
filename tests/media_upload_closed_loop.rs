@@ -114,7 +114,7 @@ async fn missing_source_surfaces_stage_tagged_error() {
         )
         .await
         .unwrap_err();
-    assert!(err.contains("media[source]"), "got: {err}");
+    assert!(err.to_string().contains("media[source]"), "got: {err}");
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn over_limit_media_is_rejected_before_upload() {
         )
         .await
         .unwrap_err();
-    assert!(err.contains("media[source]"), "got: {err}");
+    assert!(err.to_string().contains("media[source]"), "got: {err}");
     // Nothing was streamed to the uploader.
     assert_eq!(recorder.bytes.load(Ordering::SeqCst), 0);
     std::fs::remove_file(&path).ok();
@@ -159,7 +159,7 @@ async fn remote_url_without_media_id_is_rejected() {
         )
         .await
         .unwrap_err();
-    assert!(err.contains("remote URL"), "got: {err}");
+    assert!(err.to_string().contains("remote URL"), "got: {err}");
 }
 
 #[tokio::test]
