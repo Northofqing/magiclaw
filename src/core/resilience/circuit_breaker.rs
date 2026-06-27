@@ -70,7 +70,28 @@ impl CircuitBreaker {
                 }
             }
             CircuitState::HalfOpen => {
-                self.failure_count.load(Ordering::SeqCst) < self.config.half_open_max
+                // Check if too many failures have occurred in HalfOpen.
+                // If so, revert to Open to await the full timeout again.
+                if self.failure_count.load(Ordering::SeqCst) >= self.config.half_open_max {
+                    let should_revert = {
+                        if let Some(opened) = *self.opened_at.lock().unwrap() {
+                            opened.elapsed() >= self.config.timeout
+                        } else {
+                            false
+                        }
+                    };
+                    if should_revert {
+                        *state = CircuitState::Open;
+                        *self.opened_at.lock().unwrap() = Some(Instant::now());
+                        self.failure_count.store(0, Ordering::SeqCst);
+                        tracing::warn!(
+                            "circuit breaker: HalfOpen → Open (probes exhausted)"
+                        );
+                    }
+                    false
+                } else {
+                    true
+                }
             }
         }
     }
@@ -137,5 +158,39 @@ mod tests {
         assert!(!cb.allow_request());
         std::thread::sleep(Duration::from_millis(2));
         assert!(cb.allow_request()); // half-open
+    }
+
+    #[test]
+    fn half_open_reverts_to_open_when_probes_exhausted() {
+        let config = BreakerConfig {
+            failure_threshold: 1,
+            timeout: Duration::from_millis(1),
+            half_open_max: 2,
+        };
+        let cb = CircuitBreaker::new(config);
+        // Trip to Open
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for timeout, then enter HalfOpen
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Exhaust all probes in HalfOpen
+        cb.record_failure();
+        cb.record_failure(); // failure_count = half_open_max
+
+        // Now allow_request should block (probes exhausted, reverts to Open)
+        assert!(!cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Immediately after reverting to Open, still blocked
+        assert!(!cb.allow_request());
+
+        // After full timeout, can probe again (Open → HalfOpen)
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(cb.allow_request());
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
 }

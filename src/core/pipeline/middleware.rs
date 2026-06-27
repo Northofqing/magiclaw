@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 
-use crate::domain::aggregates::conversation::Conversation;
 use crate::domain::entities::message::Message;
+use crate::domain::value_objects::ConversationSnapshot;
 use crate::infrastructure::config::AppConfig;
 
 /// Context flowing through the middleware chain.
 pub struct PipelineContext {
     pub message: Message,
-    pub conversation: Conversation,
+    pub conversation: ConversationSnapshot,
     pub config: AppConfig,
     /// AI-generated response, populated by the AI middleware.
     pub ai_response: Option<String>,
@@ -23,6 +23,12 @@ pub struct PipelineContext {
 pub trait Middleware: Send + Sync {
     /// Name of this middleware for logging.
     fn name(&self) -> &'static str;
+
+    /// Whether this middleware is terminal (must always run, even on short-circuit).
+    /// Terminal middleware like Formatter and OutboxStage are never skipped.
+    fn is_terminal(&self) -> bool {
+        false
+    }
 
     /// Process the context. Return Ok(ctx) to continue, or set short_circuit to true.
     async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, String>;
@@ -50,8 +56,7 @@ impl Pipeline {
                 // Short-circuit means skip business-expensive steps (e.g. AI),
                 // but still allow terminal delivery steps to run so prompts/
                 // switch confirmations can be sent back to the user.
-                let name = step.name();
-                if name != "formatter" && name != "outbox" {
+                if !step.is_terminal() {
                     continue;
                 }
             }
@@ -105,12 +110,18 @@ mod tests {
                 content: crate::domain::entities::message::MessageContent::Text("hi".into()),
                 audit_mark: None,
             },
-            conversation: crate::domain::aggregates::conversation::Conversation::new(
-                crate::domain::value_objects::route_key::RouteKey::new(
+            conversation: crate::domain::value_objects::ConversationSnapshot {
+                route_key: crate::domain::value_objects::route_key::RouteKey::new(
                     crate::domain::value_objects::route_key::ChannelId::new("wechat"),
                     "c1", "p1", crate::domain::value_objects::route_key::ConversationType::Direct,
-                ), 200,
-            ),
+                ),
+                conversation_id: "c1".into(),
+                peer_id: "p1".into(),
+                conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct,
+                participants: vec![],
+                message_count: 0,
+                last_active_secs: 0,
+            },
             config: AppConfig::default(),
             ai_response: None,
             short_circuit: false,

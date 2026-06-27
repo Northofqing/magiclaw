@@ -52,7 +52,7 @@ impl AgentCommandParser {
                 candidates.push((agent_name.clone(), alias.clone(), alias.len()));
             }
         }
-        candidates.sort_by(|a, b| b.2.cmp(&a.2)); // Sort by length descending
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.2)); // Sort by length descending
 
         // Try to match against sorted aliases.
         for (agent_name, alias, _) in candidates {

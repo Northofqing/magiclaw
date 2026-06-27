@@ -104,7 +104,7 @@ impl ConversationStore {
                                     if let Some(ref pipeline) = pipeline {
                                         let ctx = crate::core::pipeline::PipelineContext {
                                             message: m,
-                                            conversation: conversation.clone(),
+                                            conversation: crate::domain::value_objects::ConversationSnapshot::from_conversation(&conversation, 0),
                                             config: config.clone(),
                                             ai_response: None,
                                             short_circuit: false,
@@ -172,7 +172,7 @@ impl ConversationStore {
                             if let Some(ref pipeline) = pipeline {
                                 let ctx = crate::core::pipeline::PipelineContext {
                                     message: m,
-                                    conversation: conversation.clone(),
+                                    conversation: crate::domain::value_objects::ConversationSnapshot::from_conversation(&conversation, 0),
                                     config: config.clone(),
                                     ai_response: None,
                                     short_circuit: false,
@@ -210,7 +210,7 @@ impl ConversationStore {
     fn get_or_create_tx(&self, key: &RouteKey) -> mpsc::Sender<Message> {
         // Fast path: read lock
         {
-            let routes = self.routes.read().unwrap();
+            let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
             if let Some(handle) = routes.get(key) {
                 return handle.tx.clone();
             }
@@ -218,7 +218,7 @@ impl ConversationStore {
 
         // Slow path: write lock
         let tx = {
-            let mut routes = self.routes.write().unwrap();
+            let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
             if let Some(handle) = routes.get(key) {
                 return handle.tx.clone();
             }
@@ -273,7 +273,7 @@ impl ConversationQueue for ConversationStore {
     }
 
     fn active_conversations(&self) -> usize {
-        self.routes.read().unwrap().len()
+        self.routes.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -283,7 +283,7 @@ impl ConversationGC for ConversationStore {
         let mut reclaimed_keys = Vec::new();
 
         {
-            let mut routes = self.routes.write().unwrap();
+            let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
             // retain=false removes the entry, the dropped sender triggers
             // the worker to call conversation.drain() before exiting
             routes.retain(|key, handle| {

@@ -30,6 +30,7 @@ impl Middleware for OutboxStage {
     fn name(&self) -> &'static str {
         "outbox"
     }
+    fn is_terminal(&self) -> bool { true }
 
     async fn process(&self, ctx: PipelineContext) -> Result<PipelineContext, String> {
         // Only submit when the Formatter produced an outbound reply.
@@ -73,7 +74,6 @@ impl Middleware for OutboxStage {
 mod tests {
     use super::*;
     use crate::adapters::sqlite_outbox::SqliteOutboxRepo;
-    use crate::domain::aggregates::conversation::Conversation;
     use crate::domain::entities::message::{Message, MessageContent};
     use crate::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
     use crate::infrastructure::config::AppConfig;
@@ -91,7 +91,7 @@ mod tests {
                 content: MessageContent::Text("reply".into()),
                 audit_mark: None,
             },
-            conversation: Conversation::new(rk, 200),
+            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, message_count: 0, participants: vec![], last_active_secs: 0 },
             config: AppConfig::default(),
             ai_response: None,
             short_circuit: false,

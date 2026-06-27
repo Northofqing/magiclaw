@@ -10,6 +10,7 @@ pub struct Formatter;
 #[async_trait]
 impl Middleware for Formatter {
     fn name(&self) -> &'static str { "formatter" }
+    fn is_terminal(&self) -> bool { true }
 
     async fn process(&self, mut ctx: PipelineContext) -> Result<PipelineContext, String> {
         if let Some(response) = ctx.ai_response.take() {
@@ -43,7 +44,6 @@ fn add_responder_prefix(mut text: String, responder: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::aggregates::conversation::Conversation;
     use crate::domain::entities::message::{Direction, Message};
     use crate::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
     use crate::infrastructure::config::AppConfig;
@@ -60,7 +60,7 @@ mod tests {
                 content: MessageContent::Text("hi".into()),
                 audit_mark: None,
             },
-            conversation: Conversation::new(rk, 200),
+            conversation: crate::domain::value_objects::ConversationSnapshot { route_key: rk.clone(), conversation_id: "c1".into(), peer_id: "p1".into(), conversation_type: crate::domain::value_objects::route_key::ConversationType::Direct, participants: vec![], message_count: 0, last_active_secs: 0 },
             config: AppConfig::default(),
             ai_response: None,
             short_circuit: false,

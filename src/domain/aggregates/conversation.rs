@@ -35,9 +35,11 @@ impl Conversation {
     }
 
     /// Insert a message into the reorder window and return ready messages.
+    /// Uses chrono millisecond timestamp as the wall-clock arrival anchor.
     pub fn ingest(&mut self, msg: Message) -> Vec<Message> {
         self.touch();
-        self.reorder_window.insert(msg)
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.reorder_window.insert(msg, now_ms)
     }
 
     /// Check if this conversation has been idle longer than the given duration.
