@@ -12,7 +12,7 @@
 
 use magiclaw::adapters::sqlite_inbox::SqliteInboxRepo;
 use magiclaw::domain::ports::inbox_repo::InboxRepo;
-use magiclaw::domain::storage::inbox::{InboxEntry, InboxStatus};
+use magiclaw::infrastructure::storage::inbox::{InboxEntry, InboxStatus};
 use magiclaw::domain::value_objects::route_key::ChannelId;
 use magiclaw::infrastructure::db;
 

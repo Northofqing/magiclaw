@@ -1,7 +1,7 @@
 use crate::domain::entities::message::{Direction, Message, MessageContent};
 use crate::domain::ports::conversation_queue::{ConversationQueue, EnqueueError};
 use crate::domain::ports::outbox_repo::OutboxRepo;
-use crate::domain::storage::outbox::OutboxEntry;
+use crate::infrastructure::storage::outbox::OutboxEntry;
 use crate::domain::value_objects::route_key::{ChannelId, ConversationType, RouteKey};
 
 /// Use case: construct and route an outbound text message.

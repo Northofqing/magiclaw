@@ -1,7 +1,7 @@
 use crate::domain::ports::dead_letter_repo::DeadLetterRepo;
 use crate::domain::ports::inbox_repo::{RepoError, RepoResult};
-use crate::domain::storage::dead_letter::DeadLetterEntry;
-use crate::domain::storage::outbox::OutboxEntry;
+use crate::infrastructure::storage::dead_letter::DeadLetterEntry;
+use crate::infrastructure::storage::outbox::OutboxEntry;
 use crate::infrastructure::db::DbPool;
 use rusqlite::OptionalExtension;
 

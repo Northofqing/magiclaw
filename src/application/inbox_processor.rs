@@ -1,5 +1,5 @@
 use crate::domain::ports::inbox_repo::{InboxRepo, RepoError};
-use crate::domain::storage::inbox::{InboxEntry, InboxStatus};
+use crate::infrastructure::storage::inbox::{InboxEntry, InboxStatus};
 use crate::domain::entities::message::Message;
 
 /// Process an inbound message: write to inbox for idempotency, then process.

@@ -59,7 +59,7 @@ use crate::domain::ports::inbox_repo::RepoError;
 use crate::domain::ports::audit_sink::AuditSink;
 use crate::domain::ports::context_token_store::ContextTokenStore;
 use crate::domain::ports::sync_buf_store::SyncBufStore;
-use crate::domain::storage::outbox::{OutboxEntry, RetryConfig};
+use crate::infrastructure::storage::outbox::{OutboxEntry, RetryConfig};
 use crate::domain::value_objects::route_key::RouteKey;
 use crate::infrastructure::config::{AppConfig, FeishuConfig};
 use crate::infrastructure::db::{self, DbPool};

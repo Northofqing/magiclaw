@@ -1,6 +1,6 @@
 use crate::domain::ports::inbox_repo::{RepoError, RepoResult};
 use crate::domain::ports::outbox_repo::OutboxRepo;
-use crate::domain::storage::outbox::{OutboxEntry, OutboxStatus};
+use crate::infrastructure::storage::outbox::{OutboxEntry, OutboxStatus};
 use crate::infrastructure::db::DbPool;
 
 pub struct SqliteOutboxRepo {

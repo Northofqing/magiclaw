@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::domain::entities::message::Direction;
 use crate::domain::ports::outbox_repo::OutboxRepo;
-use crate::domain::storage::outbox::OutboxEntry;
+use crate::infrastructure::storage::outbox::OutboxEntry;
 
 use super::middleware::{Middleware, PipelineContext};
 

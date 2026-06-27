@@ -1,5 +1,5 @@
 use crate::domain::ports::outbox_repo::OutboxRepo;
-use crate::domain::storage::outbox::OutboxStatus;
+use crate::infrastructure::storage::outbox::OutboxStatus;
 
 /// Recover messages that were in-flight (sending/retrying) at crash time.
 /// Resets them back to 'pending' so the outbox worker picks them up again.

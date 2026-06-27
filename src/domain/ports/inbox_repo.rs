@@ -1,4 +1,4 @@
-use crate::domain::storage::inbox::{InboxEntry, InboxStatus};
+use crate::infrastructure::storage::inbox::{InboxEntry, InboxStatus};
 
 pub type RepoResult<T> = Result<T, RepoError>;
 

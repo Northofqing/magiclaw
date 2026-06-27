@@ -1,5 +1,5 @@
 use crate::domain::ports::dead_letter_repo::DeadLetterRepo;
-use crate::domain::storage::dead_letter::DeadLetterEntry;
+use crate::infrastructure::storage::dead_letter::DeadLetterEntry;
 
 /// List dead letter entries.
 pub fn list_dead_letters(dlq: &dyn DeadLetterRepo, limit: usize) -> Result<Vec<DeadLetterEntry>, String> {

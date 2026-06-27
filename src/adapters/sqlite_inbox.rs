@@ -1,5 +1,5 @@
 use crate::domain::ports::inbox_repo::{InboxRepo, RepoError, RepoResult};
-use crate::domain::storage::inbox::{InboxEntry, InboxStatus};
+use crate::infrastructure::storage::inbox::{InboxEntry, InboxStatus};
 use crate::infrastructure::db::DbPool;
 
 pub struct SqliteInboxRepo {

@@ -1,5 +1,5 @@
-use crate::domain::storage::dead_letter::DeadLetterEntry;
-use crate::domain::storage::outbox::OutboxEntry;
+use crate::infrastructure::storage::dead_letter::DeadLetterEntry;
+use crate::infrastructure::storage::outbox::OutboxEntry;
 
 use super::inbox_repo::RepoResult;
 

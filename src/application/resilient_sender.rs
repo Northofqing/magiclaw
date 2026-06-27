@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::resilience::gate::ResilienceGate;
-use crate::domain::storage::outbox::OutboxEntry;
+use crate::infrastructure::storage::outbox::OutboxEntry;
 
 use super::outbox_worker::OutboxMessageSender;
 

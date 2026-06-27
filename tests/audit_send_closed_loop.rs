@@ -14,7 +14,7 @@ use magiclaw::adapters::sqlite_outbox::SqliteOutboxRepo;
 use magiclaw::application::audit::query_audit_logs;
 use magiclaw::application::outbox_worker::{self, OutboxMessageSender};
 use magiclaw::domain::ports::outbox_repo::OutboxRepo;
-use magiclaw::domain::storage::outbox::{OutboxEntry, RetryConfig};
+use magiclaw::infrastructure::storage::outbox::{OutboxEntry, RetryConfig};
 use magiclaw::infrastructure::db::{init_db, DbPool};
 
 struct AlwaysOk;

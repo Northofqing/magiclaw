@@ -12,7 +12,7 @@ use magiclaw::domain::entities::message::MessageContent;
 use magiclaw::domain::ports::audit_sink::AuditSink;
 use magiclaw::domain::ports::dead_letter_repo::DeadLetterRepo;
 use magiclaw::domain::ports::outbox_repo::OutboxRepo;
-use magiclaw::domain::storage::outbox::{OutboxEntry, RetryConfig};
+use magiclaw::infrastructure::storage::outbox::{OutboxEntry, RetryConfig};
 use magiclaw::domain::value_objects::route_key::{ConversationType, RouteKey};
 use magiclaw::infrastructure::config::AppConfig;
 use magiclaw::infrastructure::runtime::AppRuntime;

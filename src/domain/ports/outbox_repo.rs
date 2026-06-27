@@ -1,4 +1,4 @@
-use crate::domain::storage::outbox::{OutboxEntry, OutboxStatus};
+use crate::infrastructure::storage::outbox::{OutboxEntry, OutboxStatus};
 
 use super::inbox_repo::RepoResult;
 

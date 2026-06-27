@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use crate::domain::ports::audit_sink::AuditSink;
 use crate::domain::ports::dead_letter_repo::DeadLetterRepo;
 use crate::domain::ports::outbox_repo::OutboxRepo;
-use crate::domain::storage::dead_letter::DeadLetterEntry;
-use crate::domain::storage::outbox::{OutboxEntry, OutboxStatus, RetryConfig};
+use crate::infrastructure::storage::dead_letter::DeadLetterEntry;
+use crate::infrastructure::storage::outbox::{OutboxEntry, OutboxStatus, RetryConfig};
 
 #[async_trait]
 pub trait OutboxMessageSender: Send + Sync {
