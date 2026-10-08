@@ -72,10 +72,21 @@ fn parse_send_args(args: &[String]) -> Result<CliCommand, String> {
     let mut message: Option<String> = None;
     let mut channel: Option<SendChannel> = None;
     let mut receive_id_type: Option<String> = None;
+    let mut delivery_result_json_v1 = false;
+    let mut invocation_id: Option<String> = None;
 
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            "--delivery-result-json-v1" => delivery_result_json_v1 = true,
+            "--invocation-id" => {
+                index += 1;
+                invocation_id = Some(
+                    args.get(index)
+                        .ok_or("missing --invocation-id value")?
+                        .clone(),
+                );
+            }
             "--channel" => {
                 index += 1;
                 let value = args
@@ -132,6 +143,20 @@ fn parse_send_args(args: &[String]) -> Result<CliCommand, String> {
 
     let message =
         message.ok_or_else(|| format!("missing required flag: --message\n{}", usage()))?;
+    if delivery_result_json_v1 || invocation_id.is_some() {
+        if !delivery_result_json_v1 || channel != Some(SendChannel::Feishu) {
+            return Err("delivery-result-json-v1 requires feishu and --invocation-id".into());
+        }
+        let id = invocation_id.as_deref().ok_or("missing --invocation-id")?;
+        let parsed =
+            uuid::Uuid::parse_str(id).map_err(|_| "invocation-id must be a canonical UUIDv4")?;
+        if parsed.get_version_num() != 4
+            || parsed.get_variant() != uuid::Variant::RFC4122
+            || parsed.to_string() != id
+        {
+            return Err("invocation-id must be a canonical UUIDv4".into());
+        }
+    }
 
     Ok(CliCommand::Send(SendCommand {
         channel: channel.unwrap_or(SendChannel::Wechat),
@@ -139,6 +164,8 @@ fn parse_send_args(args: &[String]) -> Result<CliCommand, String> {
         to,
         context_token,
         receive_id_type,
+        delivery_result_json_v1,
+        invocation_id,
         message,
     }))
 }
@@ -378,6 +405,8 @@ mod tests {
                 to: None,
                 context_token: None,
                 receive_id_type: None,
+                delivery_result_json_v1: false,
+                invocation_id: None,
                 message: "hello".into(),
             })
         );
@@ -405,6 +434,8 @@ mod tests {
                 to: Some("oc_abc123".into()),
                 context_token: None,
                 receive_id_type: None,
+                delivery_result_json_v1: false,
+                invocation_id: None,
                 message: "hello feishu".into(),
             })
         );
@@ -433,6 +464,62 @@ mod tests {
             }
             other => panic!("unexpected parse result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn delivery_json_requires_feishu_and_a_fresh_nonce_shape() {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let base = vec![
+            "magiclaw",
+            "send",
+            "--channel",
+            "feishu",
+            "--message",
+            "TEST_CODE",
+        ];
+        let parse = |extras: &[&str]| {
+            let mut args: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+            args.extend(extras.iter().map(|s| s.to_string()));
+            parse_cli_args(&args)
+        };
+        match parse(&["--delivery-result-json-v1", "--invocation-id", &nonce]).unwrap() {
+            CliCommand::Send(cmd) => {
+                assert!(cmd.delivery_result_json_v1);
+                assert_eq!(cmd.invocation_id.as_deref(), Some(nonce.as_str()));
+            }
+            _ => panic!("expected send"),
+        }
+        for extras in [
+            vec!["--delivery-result-json-v1"],
+            vec!["--invocation-id", &nonce],
+            vec!["--delivery-result-json-v1", "--invocation-id"],
+            vec!["--delivery-result-json-v1", "--invocation-id", "bad"],
+            vec![
+                "--delivery-result-json-v1",
+                "--invocation-id",
+                "00000000-0000-4000-0000-000000000001",
+            ],
+            vec![
+                "--delivery-result-json-v1",
+                "--invocation-id",
+                "00000000-0000-0000-0000-000000000000",
+            ],
+            vec![
+                "--delivery-result-json-v1",
+                "--invocation-id",
+                &nonce,
+                "--channel",
+                "wechat",
+            ],
+        ] {
+            assert!(parse(&extras).is_err());
+        }
+        assert!(parse(&[
+            "--delivery-result-json-v1",
+            "--invocation-id",
+            &nonce.to_uppercase()
+        ])
+        .is_err());
     }
 
     #[test]

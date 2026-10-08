@@ -569,57 +569,28 @@ pub struct FeishuChannel {
     mode: FeishuMode,
 }
 
+/// Evidence for the opt-in text CLI only. An auth failure is produced before
+/// entering the existing message send path; no stderr text establishes phase.
+pub enum FeishuTextDeliveryEvidence {
+    AuthBeforeMessage,
+    MessageResult {
+        result: Result<SendReceipt, ChannelError>,
+        message_request_started: bool,
+    },
+    Unavailable,
+}
+
 impl Default for FeishuChannel {
     fn default() -> Self { Self::new() }
 }
 
 impl FeishuChannel {
-    pub fn new() -> Self {
-        Self {
-            channel_id: ChannelId::new("feishu"),
-            mode: FeishuMode::Stub,
-        }
-    }
-
-    pub fn from_config(cfg: FeishuConfig) -> Self {
-        let channel_id = feishu_channel_id(&cfg.account_id);
-        if cfg.enabled {
-            return Self {
-                channel_id,
-                mode: FeishuMode::OpenApi {
-                    client: reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(1000)))
-                        .build()
-                        .unwrap_or_else(|_| reqwest::Client::new()),
-                    session: std::sync::Arc::new(tokio::sync::Mutex::new(SessionState {
-                        tenant_access_token: cfg.tenant_access_token.clone(),
-                    })),
-                    config: Box::new(cfg.clone()),
-                },
-            };
-        }
-        Self {
-            channel_id,
-            mode: FeishuMode::Stub,
-        }
-    }
-}
-
-#[async_trait]
-impl Channel for FeishuChannel {
-    fn id(&self) -> ChannelId {
-        self.channel_id.clone()
-    }
-
-    async fn start(&self, _inbound_tx: mpsc::Sender<Message>) -> Result<(), ChannelError> {
-        match self.mode {
-            FeishuMode::Stub => tracing::info!("Feishu channel started (skeleton)"),
-            FeishuMode::OpenApi { .. } => tracing::info!("Feishu channel started (openapi enabled)"),
-        }
-        Ok(())
-    }
-
-    async fn send_message(&self, to: &str, content: &MessageContent) -> Result<SendReceipt, ChannelError> {
+    async fn send_message_inner(
+        &self,
+        to: &str,
+        content: &MessageContent,
+        message_request_started: Option<&mut bool>,
+    ) -> Result<SendReceipt, ChannelError> {
         match &self.mode {
             FeishuMode::Stub => {
                 let (msg_type, _) = map_content(content)?;
@@ -713,6 +684,9 @@ impl Channel for FeishuChannel {
                     content: body_content,
                 };
 
+                if let Some(marker) = message_request_started {
+                    *marker = true;
+                }
                 let resp = client
                     .post(endpoint)
                     .query(&[("receive_id_type", config.receive_id_type.as_str())])
@@ -746,6 +720,105 @@ impl Channel for FeishuChannel {
                 })
             }
         }
+    }
+
+    pub async fn send_text_with_delivery_evidence(
+        &self,
+        to: &str,
+        text: &str,
+    ) -> FeishuTextDeliveryEvidence {
+        let FeishuMode::OpenApi {
+            config, session, ..
+        } = &self.mode
+        else {
+            return FeishuTextDeliveryEvidence::Unavailable;
+        };
+        // A redirect must not let an auth request cross the message boundary.
+        // This policy is limited to opt-in first authentication.
+        let Ok(auth_client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                config.timeout_ms.max(1000),
+            ))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        else {
+            return FeishuTextDeliveryEvidence::Unavailable;
+        };
+        if ensure_tenant_token(&auth_client, config, session)
+            .await
+            .is_err()
+        {
+            return FeishuTextDeliveryEvidence::AuthBeforeMessage;
+        }
+        // A later failure never inherits the earlier auth rejection evidence.
+        // The invocation-local marker is set at the messages HTTP call itself.
+        let mut message_request_started = false;
+        let result = self
+            .send_message_inner(
+                to,
+                &MessageContent::Text(text.to_owned()),
+                Some(&mut message_request_started),
+            )
+            .await;
+        FeishuTextDeliveryEvidence::MessageResult {
+            result,
+            message_request_started,
+        }
+    }
+
+    pub fn new() -> Self {
+        Self {
+            channel_id: ChannelId::new("feishu"),
+            mode: FeishuMode::Stub,
+        }
+    }
+
+    pub fn from_config(cfg: FeishuConfig) -> Self {
+        let channel_id = feishu_channel_id(&cfg.account_id);
+        if cfg.enabled {
+            return Self {
+                channel_id,
+                mode: FeishuMode::OpenApi {
+                    client: reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(1000)))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new()),
+                    session: std::sync::Arc::new(tokio::sync::Mutex::new(SessionState {
+                        tenant_access_token: cfg.tenant_access_token.clone(),
+                    })),
+                    config: Box::new(cfg.clone()),
+                },
+            };
+        }
+        Self {
+            channel_id,
+            mode: FeishuMode::Stub,
+        }
+    }
+}
+
+#[async_trait]
+impl Channel for FeishuChannel {
+    fn id(&self) -> ChannelId {
+        self.channel_id.clone()
+    }
+
+    async fn start(&self, _inbound_tx: mpsc::Sender<Message>) -> Result<(), ChannelError> {
+        match self.mode {
+            FeishuMode::Stub => tracing::info!("Feishu channel started (skeleton)"),
+            FeishuMode::OpenApi { .. } => {
+                tracing::info!("Feishu channel started (openapi enabled)")
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_message(
+        &self,
+        to: &str,
+        content: &MessageContent,
+    ) -> Result<SendReceipt, ChannelError> {
+        self.send_message_inner(to, content, None).await
     }
 
     async fn stop(&self) -> Result<(), ChannelError> {
@@ -783,6 +856,16 @@ mod tests {
         let ch = FeishuChannel::new();
         let receipt = ch.send_message("user1", &MessageContent::Text("hi".into())).await.unwrap();
         assert!(receipt.platform_msg_id.unwrap().starts_with("feishu_stub_"));
+    }
+
+    #[tokio::test]
+    async fn typed_text_cannot_accept_a_stub_receipt() {
+        assert!(matches!(
+            FeishuChannel::new()
+                .send_text_with_delivery_evidence("TEST_CODE", "TEST_CODE")
+                .await,
+            FeishuTextDeliveryEvidence::Unavailable
+        ));
     }
 
     #[test]

@@ -724,6 +724,39 @@ async fn run_send_feishu(cmd: &SendCommand) -> Result<(), Box<dyn std::error::Er
         cfg.receive_id_type = detected.to_string();
     }
 
+    if cmd.delivery_result_json_v1 {
+        use magiclaw::cli::delivery_result::FeishuDeliveryResultV1;
+        use std::io::Write;
+
+        let binding = FeishuDeliveryResultV1::new(
+            cmd.invocation_id
+                .as_deref()
+                .expect("parser validates opt-in invocation"),
+            &cfg,
+            recipient,
+            &cmd.message,
+        );
+        let output = if validate_feishu_config(&cfg).is_err() {
+            binding
+        } else {
+            binding.finish(
+                FeishuChannel::from_config(cfg)
+                    .send_text_with_delivery_evidence(recipient, &cmd.message)
+                    .await,
+            )
+        };
+        let accepted = output.accepted();
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &output)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+        return if accepted {
+            Ok(())
+        } else {
+            Err("typed feishu delivery unsuccessful".into())
+        };
+    }
+
     if let Err(e) = validate_feishu_config(&cfg) {
         return Err(format!("飞书配置无效: {}", e).into());
     }
@@ -975,6 +1008,8 @@ mod tests {
                 to: None,
                 context_token: None,
                 receive_id_type: None,
+                delivery_result_json_v1: false,
+                invocation_id: None,
                 message: "hello".into(),
             })
         );
@@ -1002,6 +1037,8 @@ mod tests {
                 to: Some("oc_abc123".into()),
                 context_token: None,
                 receive_id_type: None,
+                delivery_result_json_v1: false,
+                invocation_id: None,
                 message: "hello feishu".into(),
             })
         );
