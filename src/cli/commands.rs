@@ -79,6 +79,8 @@ pub struct SendCommand {
     pub to: Option<String>,
     pub context_token: Option<String>,
     pub receive_id_type: Option<String>,
+    pub delivery_result_json_v1: bool,
+    pub invocation_id: Option<String>,
     pub message: String,
 }
 

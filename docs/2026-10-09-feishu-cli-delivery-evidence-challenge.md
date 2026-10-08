@@ -1,0 +1,14 @@
+# Four-perspective agent challenge
+
+These are agent review perspectives, not human authorization. Round 1 and round 2 were discussed with the independent protocol/consumer reviewer; source/fixture review is still required.
+
+|Perspective|Challenge|Resolution and verification boundary|
+|---|---|---|
+|Product manager (author review)|A successful module test could hide a disconnected CLI, and new evidence might be presented as proof of client receipt.|Wire actual main send route; real CLI subprocess loopback tests; classify provider Accepted only; capability stays experimental pending consumer alignment.|
+|Network/communications engineer (independent reviewer)|A nonzero exit or stderr pattern cannot prove no message request. Deterministic attempt IDs allow stale result replay. stdout pollution or missing remote ID might be wrongly accepted.|First-auth dedicated type; marker at messages call; random fresh UUIDv4; exact target/body binding; account/app/type expected values checked by consumer; one complete JSON; missing remote ID Unknown; kill/no stdout Unknown. Consumer rejects unknown/duplicate fields, malformed/tail output and inconsistent exit.|
+|User perspective (root agent, derived from user scope)|The goal is ongoing natural notifications with the same identity. Missing real data must be clearly represented, and historical unknown records must not be changed to success or resent.|No account/bot/config/data-platform recovery; no real sending/deployment; only fresh invocation evidence; no mutation/replay of old 79; platform acceptance is distinct from client display. This is proxy review, not formal human signoff.|
+|DDD architect (independent reviewer)|A platform-wide phase/CLI abstraction would leak adapter contracts into all channels and alter durable reservation ownership. A second auth or later failure must not inherit first-auth evidence.|Feishu text-only inherent method and CLI adapter result module; unchanged Channel trait/errors/daemon/media behavior; invocation-local marker; later failures Unknown; consumer uses existing durable finalization and does not launch retries or revoke attempt markers in its parser.|
+
+Round 2 identity concern: configured app/account fields are metadata until the consumer checks expected approved nonsecret values. Root selected explicit opt-in and expected app SHA/account ID, with explicit receive ID type. No secret-config reader is introduced by the producer. Schema, fresh nonce, hashes and exit are a cooperating reviewed-binary contract; they are not a cryptographic attestation of arbitrary executables.
+
+Remaining integration gate: independently review final producer and consumer files, align their real process fixture, and record checks/coverage honestly. No unresolved design objection is being deferred into an automatic historical retry.

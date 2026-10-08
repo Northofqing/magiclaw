@@ -1,0 +1,10 @@
+# Scoped implementation and verification plan
+
+1. Read AGENTS.md, dated Rust migration v5 and relevant existing CLI/channel code; preserve original audit_chain.rs work; create Desktop-external worktree from committed HEAD. Baseline: targeted existing Feishu library tests.
+2. Record narrow flow, exact flags/schema/exit combinations, trust assumptions, failure/rollback and impact matrix; close role challenge design objections. Do not start unrelated platform work.
+3. Add paired opt-in flags/canonical UUID validation; add auth-before-message typed evidence with invocation-local messages-call marker; serialize fixed redacted results at the actual main call site. Keep legacy/daemon/other channels unchanged.
+4. Run targeted parser/result/channel unit checks and a real CLI loopback integration target. Exercise auth transport/exchange/parse failure with zero message calls; message network/parse/business/missing-ID uncertainty; success remote ID; legacy stdout; config preflight; explicit ID type; secrets absent; isolated credentials/requests; process kill during auth and messages, then independent fresh invocation.
+5. Measure affected line coverage using LLVM instrumentation, preserving the subprocess profile environment only; do not claim unmeasured coverage. Run Rust formatting and targeted lint checks. Independently review producer/schema plus consumer alignment. Fix relevant findings and repeat only affected checks.
+6. Record actual evidence and remaining integration/deployment boundaries in a checklist. Commit only the isolated candidate. Root owns final consumer integration and any separately authorized deployment. Do not modify any of the old 79 uncertain rows or resend them.
+
+Red lines involved: stdout zero-pollution, account/channel isolation, trustworthy delivery phases, no implicit retry/fallback, unchanged persistence/audit/worker contracts. No new dependency, schema, core model, route ordering, daemon installation, credential provisioning or platform recovery is included.
